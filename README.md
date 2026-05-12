@@ -1,6 +1,6 @@
 # JzjSkills
 
-个人常用 Claude Code Skills 集合，通过 Git 统一管理和复用。
+常用 Skills 整理，通过 Git 统一管理和复用。
 
 ## 目录结构
 
