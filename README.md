@@ -13,12 +13,14 @@ JzjSkills/
 │   │   └── SKILL.md                     # skill 定义文件（必需）
 │   ├── java-springboot/
 │   │   └── SKILL.md
+│   ├── flutter-use-http-package/        # flutter-* 系列均为单文件 skill
+│   │   └── SKILL.md
 │   ├── spring-testing-fundamentals/
 │   │   ├── SKILL.md
 │   │   └── references/                  # 部分 skill 附带参考文档，需一并保留
 │   │       └── *.md
-│   └── …（spring-mvc-testing、spring-webflux-testing、spring-jpa-testing、
-│           spring-security-testing、spring-websocket-testing 结构同上）
+│   └── …（spring-mvc-testing … 等 spring-* 结构同上；
+│           另有 10 个 flutter-* skill，均仅含 SKILL.md）
 └── README.md
 ```
 
@@ -53,6 +55,16 @@ description: 简短描述这个 skill 做什么
 | `spring-jpa-testing` | 同上 | [skills/spring-jpa-testing/](https://github.com/spring-ai-community/spring-testing-skills/tree/main/skills/spring-jpa-testing) | Apache-2.0 | 2026-07-01 | 原样引入；含 `references/`（4 个文件） |
 | `spring-security-testing` | 同上 | [skills/spring-security-testing/](https://github.com/spring-ai-community/spring-testing-skills/tree/main/skills/spring-security-testing) | Apache-2.0 | 2026-07-01 | 原样引入；含 `references/`（1 个文件） |
 | `spring-websocket-testing` | 同上 | [skills/spring-websocket-testing/](https://github.com/spring-ai-community/spring-testing-skills/tree/main/skills/spring-websocket-testing) | Apache-2.0 | 2026-07-01 | 原样引入；含 `references/`（1 个文件） |
+| `flutter-add-integration-test` | [flutter/skills](https://github.com/flutter/skills)（Flutter 官方） | [skills/flutter-add-integration-test/](https://github.com/flutter/skills/tree/main/skills/flutter-add-integration-test) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-add-widget-preview` | 同上 | [skills/flutter-add-widget-preview/](https://github.com/flutter/skills/tree/main/skills/flutter-add-widget-preview) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-add-widget-test` | 同上 | [skills/flutter-add-widget-test/](https://github.com/flutter/skills/tree/main/skills/flutter-add-widget-test) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-apply-architecture-best-practices` | 同上 | [skills/flutter-apply-architecture-best-practices/](https://github.com/flutter/skills/tree/main/skills/flutter-apply-architecture-best-practices) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-build-responsive-layout` | 同上 | [skills/flutter-build-responsive-layout/](https://github.com/flutter/skills/tree/main/skills/flutter-build-responsive-layout) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-fix-layout-issues` | 同上 | [skills/flutter-fix-layout-issues/](https://github.com/flutter/skills/tree/main/skills/flutter-fix-layout-issues) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-implement-json-serialization` | 同上 | [skills/flutter-implement-json-serialization/](https://github.com/flutter/skills/tree/main/skills/flutter-implement-json-serialization) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-setup-declarative-routing` | 同上 | [skills/flutter-setup-declarative-routing/](https://github.com/flutter/skills/tree/main/skills/flutter-setup-declarative-routing) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-setup-localization` | 同上 | [skills/flutter-setup-localization/](https://github.com/flutter/skills/tree/main/skills/flutter-setup-localization) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-use-http-package` | 同上 | [skills/flutter-use-http-package/](https://github.com/flutter/skills/tree/main/skills/flutter-use-http-package) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
 
 ## 更新已引入的 Skill
 
@@ -72,6 +84,16 @@ curl -sSL https://raw.githubusercontent.com/github/awesome-copilot/main/skills/j
 git clone --depth 1 https://github.com/spring-ai-community/spring-testing-skills /tmp/sts
 rsync -a --delete /tmp/sts/skills/spring-jpa-testing/ skills/spring-jpa-testing/
 ```
+
+**成套引入的同源 skill**（如 10 个 `flutter-*`）——浅克隆上游后，一次性覆盖全部同前缀目录：
+
+```bash
+git clone --depth 1 https://github.com/flutter/skills /tmp/flutter-skills
+# 仅覆盖 skills/ 下的 flutter-* 目录，不引入上游的 resources/、tool/、.agents/ 等基建
+cp -R /tmp/flutter-skills/skills/flutter-* skills/
+```
+
+> 注意：这里用 `cp -R` 而非 `rsync --delete`——`skills/` 目录下混有其他来源的 skill，整目录 `--delete` 会误删它们。
 
 完成后用 `git diff` 查看上游变更，确认无误再提交。若本地对某 skill 做过定制修改，请手动合并，避免被覆盖。
 
