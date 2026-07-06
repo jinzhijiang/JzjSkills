@@ -20,7 +20,7 @@ JzjSkills/
 │   │   └── references/                  # 部分 skill 附带参考文档，需一并保留
 │   │       └── *.md
 │   └── …（spring-mvc-testing … 等 spring-* 结构同上；
-│           另有 10 个 flutter-* skill，均仅含 SKILL.md）
+│           另有 11 个 flutter-* skill（10 个 Flutter 官方 + 1 个自建 flutter-ui-automation），均仅含 SKILL.md）
 └── README.md
 ```
 
@@ -65,6 +65,7 @@ description: 简短描述这个 skill 做什么
 | `flutter-setup-declarative-routing` | 同上 | [skills/flutter-setup-declarative-routing/](https://github.com/flutter/skills/tree/main/skills/flutter-setup-declarative-routing) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
 | `flutter-setup-localization` | 同上 | [skills/flutter-setup-localization/](https://github.com/flutter/skills/tree/main/skills/flutter-setup-localization) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
 | `flutter-use-http-package` | 同上 | [skills/flutter-use-http-package/](https://github.com/flutter/skills/tree/main/skills/flutter-use-http-package) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
+| `flutter-ui-automation` | 自建 / 内部整理 | 底层工具 [ai-dashboad/flutter-skill](https://github.com/ai-dashboad/flutter-skill)（本机用 [jinzhijiang](https://github.com/jinzhijiang/flutter-skill) fork） | — | 2026-07-06 | 自建；记录 `flutter_skill` 连接/探查用法，由 flutter_todo `.agents/skills` 移入并泛化为通用 Flutter 版 |
 
 ## 更新已引入的 Skill
 
@@ -94,6 +95,8 @@ cp -R /tmp/flutter-skills/skills/flutter-* skills/
 ```
 
 > 注意：这里用 `cp -R` 而非 `rsync --delete`——`skills/` 目录下混有其他来源的 skill，整目录 `--delete` 会误删它们。
+>
+> `flutter-ui-automation` 是自建 skill、并非 flutter/skills 成员，上游没有同名目录，上面的 `cp -R flutter-*` 不会覆盖它；它的维护独立进行。
 
 完成后用 `git diff` 查看上游变更，确认无误再提交。若本地对某 skill 做过定制修改，请手动合并，避免被覆盖。
 
