@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flutter Firebase + Crashlytics"
+  short_description: "为 Flutter 项目接入 Firebase、Analytics 与崩溃统计"
+  default_prompt: "Use $flutter-setup-firebase-crashlytics to integrate Firebase Core, Google Analytics, and Crashlytics into this Flutter project."
