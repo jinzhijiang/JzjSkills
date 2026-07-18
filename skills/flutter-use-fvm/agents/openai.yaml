@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flutter FVM Workflow"
+  short_description: "Run Flutter and Dart commands through FVM"
+  default_prompt: "Use $flutter-use-fvm to run this Flutter project's commands with its FVM-managed SDK."
