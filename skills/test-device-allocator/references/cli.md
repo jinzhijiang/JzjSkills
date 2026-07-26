@@ -35,7 +35,7 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--platform {android,ios,any}` | any | 平台过滤;`ios` 仅 macOS |
+| `--platform {android,ios,any}` | android | 平台过滤;Flutter 项目未指明平台、也没开发平台特有功能时用默认 android;两端皆可才传 any;`ios` 仅 macOS |
 | `--device <id>` | — | 指定设备(serial / UDID / AVD 名),只尝试它;被占 → exit 7 |
 | `--no-physical` | 关 | 排除真机(不想占用插着的手机时用) |
 | `--no-create` | 关 | 只复用现有设备,无空闲直接 exit 3 |
@@ -111,7 +111,7 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 | 2 | — | 参数错误(argparse) |
 | 3 | NO_DEVICE | 无可用候选且不允许/无法新建;或 `--device` 目标不存在 |
 | 4 | NO_SYSTEM_IMAGE | Android 新建被缺镜像挡住(hint 给 sdkmanager 命令,不自动下载) |
-| 5 | BOOT_TIMEOUT | 模拟器启动/就绪超时(锁已回滚,不会锁着一台起不来的设备) |
+| 5 | BOOT_TIMEOUT | 模拟器启动/就绪超时(锁已回滚,本次拉起的模拟器进程也会被关闭) |
 | 6 | ENV_MISSING | 所选平台工具链缺失(无 Android SDK / 无 xcrun) |
 | 7 | BUSY | `--device` 指定的设备被存活锁占用 |
 | 8 | INTERNAL | 未预期异常(traceback 在 stderr) |
@@ -120,5 +120,5 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 
 - 同 `owner`+`project` 重复 acquire → 返回已持有设备,`reused: true`,并刷新 `acquired_at`(续 TTL);若该设备已被手动关掉,会自动重新启动它。
 - 多会话同刻抢同一候选:`mkdir` 只有一个成功,失败方自动尝试下一候选;双方同时判定某锁陈旧时,rename 先到者才有权删除。
-- 候选启动失败会先回滚锁再换下一台。
+- 候选启动失败会先回滚锁、关掉本次拉起的模拟器进程,再换下一台;不会遗留"锁着/跑着一台起不来的设备"。
 - 锁着的模拟器被人手动关机:锁仍视为持有(owner 可能重启它),不会被误回收;在 status 里表现为 `state: stopped` 且 `lock` 非空。

@@ -1,6 +1,6 @@
 ---
 name: test-device-allocator
-description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任何要把 Flutter / Android / iOS app 跑到真机或模拟器上做自动化测试、UI 探查、E2E 验证之前,先运行本 skill 的 scripts/device_lock.py acquire 领取一台空闲设备(优先空闲真机,其次已在运行的空闲模拟器,再启动已停止的模拟器,最后自动新建),拿到 JSON 里的 device id 后显式传给 flutter run -d / flutter drive -d / adb -s,测试完 release 释放。触发词:设备分配、分配模拟器、锁定设备、设备被占用、多项目同时测试、并发测试、抢设备、emulator、simulator、AVD、adb devices、xcrun simctl、模拟器互相污染。不适用于:单元测试与 Widget 测试(flutter test,不需要设备)、HarmonyOS 模拟器(用 deveco-studio-emulator)、用户手动开发调试自行选设备的场景。
+description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任何要把 Flutter / Android / iOS app 跑到真机或模拟器上做自动化测试、UI 探查、E2E 验证之前,先运行本 skill 的 scripts/device_lock.py acquire 领取一台空闲设备(优先空闲真机,其次已在运行的空闲模拟器,再启动已停止的模拟器,最后自动新建),拿到 JSON 里的 device id 后显式传给 flutter run -d / flutter drive -d / adb -s,测试完 release 释放。Flutter 项目未说明用什么平台、也没有开发平台特有功能时,默认用 Android 测试(acquire 默认即 android)。触发词:设备分配、分配模拟器、锁定设备、设备被占用、多项目同时测试、并发测试、抢设备、emulator、simulator、AVD、adb devices、xcrun simctl、模拟器互相污染。不适用于:单元测试与 Widget 测试(flutter test,不需要设备)、HarmonyOS 模拟器(用 deveco-studio-emulator)、用户手动开发调试自行选设备的场景。
 ---
 
 # 并发测试设备分配(device_lock)
@@ -17,6 +17,14 @@ description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任
 - 测试结束(无论成败)都要 release。忘了也有 owner 进程死亡 / TTL 超时兜底回收,但不要依赖兜底。
 - 锁是**协作约定**:只对同样走本 skill 的会话生效,拦不住绕过它的进程,所以所有项目的 AI 测试流程都必须从 acquire 开始。
 
+## 平台选择(默认 Android)
+
+- 用户或任务**明确指定了平台** → 按指定传 `--platform android|ios`。
+- **Flutter 项目未说明平台、也没有开发平台特有功能 → 默认 Android**:`acquire` 不传 `--platform` 即为 android,不要主动升级成 `any` 或 iOS。
+- 项目明显只面向某一平台(如任务在改 iOS 侧代码 / 只配置了某端)→ 用对应平台。
+- 两端都要测或用户明说都可以 → `--platform any`(此时无空闲设备会优先新建 iOS 模拟器,更快)。
+- Android 原生项目恒为 android;`--platform ios` 仅 macOS 可用。
+
 ## 前置条件
 
 - 仅需 `python3`(标准库,无第三方依赖)。脚本在本 skill 目录内:`python3 <skill根>/scripts/device_lock.py …`
@@ -28,7 +36,7 @@ description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任
 
 | 子命令 | 用途 | 常用参数 |
 |---|---|---|
-| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|any`(默认 any)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>` |
+| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|any`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>` |
 | `release` | 释放锁(幂等,恒 exit 0) | `--key <device_key>` / `--device <id>` / `--all-mine` |
 | `status` | 设备 × 锁全景(排查谁占了什么) | 无 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
@@ -41,8 +49,9 @@ description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任
 SKILL_DIR=<本 skill 根目录>          # 例:~/.claude/skills/test-device-allocator
 cd <被测项目根目录>
 
-# 1. 领设备(真机最优先;全被占时自动新建模拟器并等它就绪)
-OUT=$(python3 "$SKILL_DIR/scripts/device_lock.py" acquire --platform any --owner $PPID --project "$PWD")
+# 1. 领设备(默认 android,真机最优先;全被占时自动新建模拟器并等它就绪)
+#    要测 iOS 传 --platform ios;两端皆可传 --platform any
+OUT=$(python3 "$SKILL_DIR/scripts/device_lock.py" acquire --owner $PPID --project "$PWD")
 DEVICE_ID=$(echo "$OUT"  | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_id"])')
 DEVICE_KEY=$(echo "$OUT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_key"])')
 

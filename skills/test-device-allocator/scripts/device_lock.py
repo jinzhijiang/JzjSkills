@@ -603,22 +603,40 @@ def boot_avd(avd, headless, timeout):
         cmd.append("-no-window")
     log(f"启动 Android 模拟器 {avd}(约 30-120s)…")
     try:
-        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
         raise BootFailure(f"emulator 进程启动失败: {e}")
-    serial, deadline = None, time.time() + SERIAL_DISCOVER_TIMEOUT
-    while serial is None and time.time() < deadline:
-        time.sleep(2)
-        for s in sorted(all_emulator_serials(adb) - before):
-            if avd_for_serial(adb, s) == avd:
-                serial = s
-                break
-    if serial is None:
-        raise BootFailure(f"{SERIAL_DISCOVER_TIMEOUT}s 内未发现 {avd} 的新模拟器串号")
-    log(f"{avd} → {serial},等待 sys.boot_completed …")
-    wait_android_booted(adb, serial, timeout, avd)
-    return serial
+    serial = None
+    try:
+        deadline = time.time() + SERIAL_DISCOVER_TIMEOUT
+        while serial is None and time.time() < deadline:
+            time.sleep(2)
+            for s in sorted(all_emulator_serials(adb) - before):
+                if avd_for_serial(adb, s) == avd:
+                    serial = s
+                    break
+        if serial is None:
+            raise BootFailure(f"{SERIAL_DISCOVER_TIMEOUT}s 内未发现 {avd} 的新模拟器串号")
+        log(f"{avd} → {serial},等待 sys.boot_completed …")
+        wait_android_booted(adb, serial, timeout, avd)
+        return serial
+    except BootFailure:
+        _kill_launched_emulator(proc, adb, serial, avd)
+        raise
+
+
+def _kill_launched_emulator(proc, adb, serial, avd):
+    """启动失败回滚:关掉本次拉起的模拟器,不遗留后台进程。"""
+    log(f"回滚:关闭本次启动失败的模拟器 {avd}" + (f"({serial})" if serial else ""))
+    if serial:
+        run([adb, "-s", serial, "emu", "kill"], timeout=10)
+        for _ in range(5):
+            if proc.poll() is not None:
+                return
+            time.sleep(1)
+    if proc.poll() is None:
+        proc.kill()
 
 
 def wait_android_booted(adb, serial, timeout, label):
@@ -635,10 +653,14 @@ def wait_android_booted(adb, serial, timeout, label):
 def boot_sim(udid, headless, timeout):
     rc, out, err = run(["xcrun", "simctl", "boot", udid], timeout=30)
     combined = (out or "") + (err or "")
+    we_booted = rc == 0  # rc!=0 且含 Booted = 它本来就开着,失败时不要替人关机
     if rc != 0 and "Booted" not in combined:
         raise BootFailure(f"simctl boot 失败: {combined.strip()[:200]}")
     rc, out, err = run(["xcrun", "simctl", "bootstatus", udid, "-b"], timeout=timeout)
     if rc != 0:
+        if we_booted:
+            log(f"回滚:关闭本次启动失败的模拟器 {udid}")
+            run(["xcrun", "simctl", "shutdown", udid], timeout=30)
         raise BootFailure(f"simctl bootstatus 未就绪: {((err or out) or '').strip()[:200]}")
     if not headless and sys.platform == "darwin":
         run(["open", "-g", "-a", "Simulator"], timeout=10)
@@ -840,9 +862,12 @@ def cmd_acquire(args):
             flush_warnings(warnings)
             emit(build_result(c, owner, project, created=True, booted=True, reused=False))
 
+    platform_hint = ("默认平台是 android;要用 iOS 模拟器传 --platform ios,两端皆可传 --platform any"
+                     if args.platform == "android" else None)
     if last_env_fail:
-        fail(EXIT_ENV_MISSING, "ENV_MISSING", f"无空闲设备且无法新建: {last_env_fail}")
-    fail(EXIT_NO_DEVICE, "NO_DEVICE", "无空闲设备且无法新建模拟器")
+        fail(EXIT_ENV_MISSING, "ENV_MISSING", f"无空闲设备且无法新建: {last_env_fail}",
+             hint=platform_hint)
+    fail(EXIT_NO_DEVICE, "NO_DEVICE", "无空闲设备且无法新建模拟器", hint=platform_hint)
 
 
 def cmd_release(args):
@@ -963,7 +988,8 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("acquire", help="领取并锁定一台空闲设备")
-    a.add_argument("--platform", choices=["android", "ios", "any"], default="any")
+    a.add_argument("--platform", choices=["android", "ios", "any"], default="android",
+                   help="平台(默认 android;Flutter 项目未指明平台时按默认走,两端皆可用 any)")
     a.add_argument("--device", help="指定设备(serial / UDID / AVD 名),只尝试它")
     a.add_argument("--no-physical", action="store_true", help="排除真机")
     a.add_argument("--no-create", action="store_true", help="只复用现有设备,不新建")
