@@ -50,6 +50,19 @@ python3 <skill根>/scripts/device_lock.py clean --all
 | 6 ENV_MISSING | 平台工具链缺失 | 装 Android SDK / Xcode;Linux 宿主不支持 iOS |
 | 7 BUSY | `--device` 指定的设备被占 | 去掉 `--device` 另挑;或 `status` 看占用者是谁 |
 | 8 INTERNAL | 未预期异常 | 看 stderr 的 traceback 排查 |
+| 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满或可用内存 < 6GB) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)后重试;确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
+
+## 模拟器卡死(内存超卖)
+
+**症状**:模拟器画面停帧(截图内容不再变化)、对它的 `adb shell` 挂起、`flutter run` 报 `Lost connection to device`;卡死前 guest 日志常见大量 `Skipped NN frames`、`Davey! duration=…`、binder 调用超秒、`SurfaceSyncGroup` 超时。
+
+**根因**:宿主并发跑多台模拟器 + 构建(Gradle/Xcode)时内存超卖,macOS/Linux 把 QEMU 的 guest RAM 换页到 swap,vCPU 与图形转发(gfxstream)线程等换入而停摆——进程不死、只冻画面,看起来就是"卡死"。16GB 机器上 2 台模拟器 + 一次冷构建即可触发。
+
+**处置**:
+1. 冻住的模拟器救不回来,直接冷关:`adb -s <id> emu kill`;没响应就 `pkill -f qemu-system`(或按 pid 杀)。
+2. `adb kill-server && adb start-server` 只能修 adb 连接,救不了 QEMU 本体。
+3. 减少并发:内存闸门(见 cli.md)默认就按宿主内存限流;16GB 机器建议同时最多 1-2 台,并发会话优先领真机。
+4. `status` 输出里的 `memory` 字段可直接看 `available_gb` / `running_vms` / `can_start_new_vm`。
 
 ## 边界行为速查
 
@@ -58,4 +71,6 @@ python3 <skill根>/scripts/device_lock.py clean --all
 - AI 忘记 release:owner 进程退出后,任意会话下次 acquire 时自动回收;或手动 `clean`。
 - 长时间压测(> 8h)记得传大 `--ttl`,否则锁可能被判陈旧回收。
 - 自定义 `AI_DEVICE_LOCKS_DIR` 时,同机所有会话必须用同一个值,否则互相看不见锁、互斥失效。
-- 锁着的模拟器被人手动关掉:锁不会被误回收;持有者下次幂等 acquire 会自动把它重新启动。
+- 锁着的模拟器被人手动关掉:锁不会被误回收;持有者下次幂等 acquire 会自动把它重新启动(此重启不过内存闸门——净占用不增)。
+- offline / 卡死的模拟器串号计入内存配额(qemu 进程还活着就仍占内存);想释放配额先把它冷关掉。
+- 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。

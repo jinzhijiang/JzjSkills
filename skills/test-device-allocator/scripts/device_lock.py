@@ -40,6 +40,14 @@ TOMB_MAX_AGE = 600             # .reclaim-* 墓碑残骸清理阈(秒)
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_DEVICE, EXIT_NO_SYSTEM_IMAGE = 0, 2, 3, 4
 EXIT_BOOT_TIMEOUT, EXIT_ENV_MISSING, EXIT_BUSY, EXIT_INTERNAL = 5, 6, 7, 8
+EXIT_MEMORY = 9
+
+# 内存闸门:启动/新建模拟器前按宿主内存核算,避免超卖把整机拖进 swap(模拟器整体
+# 冻结的常见根因)。真机与已在运行的模拟器不受影响;探测失败自动放行(fail-open)。
+MEM_RESERVE_GB = 8.0    # 预留给 OS / IDE / 构建进程的基线内存
+MEM_PER_VM_GB = 4.0     # 每台模拟器的估算宿主开销(约 2GB guest RAM + QEMU/图形转发)
+MEM_MIN_FREE_GB = 2.0   # 启动新 VM 时,估算开销之外还需的安全垫
+MEM_MAX_VMS_CAP = 4     # 自动配额上限(--max-emulators / AI_DEVICE_MAX_EMULATORS 可突破)
 
 _ACTION = "device_lock"
 
@@ -156,6 +164,159 @@ def host_abi():
 
 def have_simctl():
     return sys.platform == "darwin" and shutil.which("xcrun") is not None
+
+
+# ---------- 内存感知 ----------
+
+def _win_memory_status():
+    """Windows: (total_bytes, avail_bytes);失败返回 None。"""
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32),
+                        ("dwMemoryLoad", ctypes.c_uint32),
+                        ("ullTotalPhys", ctypes.c_uint64),
+                        ("ullAvailPhys", ctypes.c_uint64),
+                        ("ullTotalPageFile", ctypes.c_uint64),
+                        ("ullAvailPageFile", ctypes.c_uint64),
+                        ("ullTotalVirtual", ctypes.c_uint64),
+                        ("ullAvailVirtual", ctypes.c_uint64),
+                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+        st = MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return st.ullTotalPhys, st.ullAvailPhys
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def mem_total_gb():
+    """宿主物理内存(GB);探测失败返回 None(闸门 fail-open)。"""
+    try:
+        if sys.platform == "darwin":
+            rc, out, _ = run(["sysctl", "-n", "hw.memsize"], timeout=5)
+            if rc == 0 and out.strip().isdigit():
+                return int(out.strip()) / 1024 ** 3
+        elif sys.platform.startswith("linux"):
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        return int(line.split()[1]) / 1024 ** 2
+        elif sys.platform == "win32":
+            st = _win_memory_status()
+            if st:
+                return st[0] / 1024 ** 3
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def mem_available_gb():
+    """当前可用内存(GB),口径尽量贴近 Linux MemAvailable;失败返回 None。
+
+    macOS 的 free 页远低估真实可用量,按 free+inactive+purgeable+speculative 估算。
+    """
+    try:
+        if sys.platform == "darwin":
+            rc, out, _ = run(["vm_stat"], timeout=5)
+            if rc != 0:
+                return None
+            m = re.search(r"page size of (\d+) bytes", out)
+            page_size = int(m.group(1)) if m else 16384
+            pages = {}
+            for line in out.splitlines():
+                mm = re.match(r"^(Pages [a-z ]+?)\s*:\s+(\d+)\.", line.strip())
+                if mm:
+                    pages[mm.group(1)] = int(mm.group(2))
+            wanted = ("Pages free", "Pages inactive", "Pages purgeable",
+                      "Pages speculative")
+            if not any(k in pages for k in wanted):
+                return None
+            return sum(pages.get(k, 0) for k in wanted) * page_size / 1024 ** 3
+        elif sys.platform.startswith("linux"):
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) / 1024 ** 2
+        elif sys.platform == "win32":
+            st = _win_memory_status()
+            if st:
+                return st[1] / 1024 ** 3
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def auto_max_vms(total_gb):
+    """按总内存推导并发模拟器上限:(总量-预留)/每台开销,夹在 [1, CAP]。"""
+    if total_gb is None:
+        return None
+    return max(1, min(MEM_MAX_VMS_CAP,
+                      int((total_gb - MEM_RESERVE_GB) // MEM_PER_VM_GB)))
+
+
+def env_max_vms():
+    v = os.environ.get("AI_DEVICE_MAX_EMULATORS", "").strip()
+    try:
+        return int(v) if v else None
+    except ValueError:
+        return None
+
+
+def running_vm_count():
+    """当前在跑的模拟器总数(Android emulator 串号 + iOS Booted)。
+
+    offline/卡死的 emulator 串号也计入——进程还活着就仍占着内存。
+    """
+    n = 0
+    adb = tool("adb")
+    if adb:
+        n += len(all_emulator_serials(adb))
+    if have_simctl():
+        booted, _ = ios_sims()
+        n += len(booted)
+    return n
+
+
+def mem_policy(max_override=None, ignore=False):
+    """评估内存闸门,返回 dict。enabled=False 表示不拦截(显式覆盖或探测失败)。"""
+    info = {"enabled": True, "blocked": False, "reason": None,
+            "total_gb": None, "available_gb": None,
+            "running_vms": None, "max_vms": None,
+            "need_gb": round(MEM_PER_VM_GB + MEM_MIN_FREE_GB, 1)}
+    if ignore or os.environ.get("AI_DEVICE_MEM_OVERRIDE", "").lower() in ("1", "true", "yes"):
+        info["enabled"] = False
+        return info
+    total, avail = mem_total_gb(), mem_available_gb()
+    info["total_gb"] = None if total is None else round(total, 1)
+    info["available_gb"] = None if avail is None else round(avail, 1)
+    max_vms = max_override if max_override is not None else env_max_vms()
+    if max_vms is None:
+        max_vms = auto_max_vms(total)
+    info["max_vms"] = max_vms
+    if max_vms is None and avail is None:
+        info["enabled"] = False  # 全部探测失败,放行
+        return info
+    running = running_vm_count()
+    info["running_vms"] = running
+    if max_vms is not None and running >= max_vms:
+        info["blocked"] = True
+        info["reason"] = (f"并发配额已满:宿主内存 {info['total_gb']}GB 对应上限 "
+                          f"{max_vms} 台模拟器,当前已有 {running} 台在运行")
+    elif avail is not None and avail < MEM_PER_VM_GB + MEM_MIN_FREE_GB:
+        info["blocked"] = True
+        info["reason"] = (f"可用内存不足:当前约 {info['available_gb']}GB,"
+                          f"再启动一台估算需 {info['need_gb']}GB")
+    return info
+
+
+MEM_HINT = ("优先领真机或复用已在运行的空闲模拟器;关闭闲置模拟器释放内存"
+            "(adb -s <id> emu kill / xcrun simctl shutdown <udid>)后重试;"
+            "确认内存有余量时可 --mem-override 跳过,或用 --max-emulators / "
+            "环境变量 AI_DEVICE_MAX_EMULATORS 调整上限")
 
 
 # ---------- 锁层 ----------
@@ -705,7 +866,10 @@ def timeout_for(args, platform_):
 
 
 def reuse_existing(meta, args, warnings):
-    """幂等重取:确认已持有的设备仍就绪(必要时重新启动)。"""
+    """幂等重取:确认已持有的设备仍就绪(必要时重新启动)。
+
+    重启已持有的模拟器不过内存闸门:它只是恢复之前的占用,总量不增。
+    """
     c = {"tier": 0, "platform": meta["platform"], "kind": meta["kind"],
          "key": meta["device_key"], "name": meta.get("name"),
          "device_id": meta.get("device_id"), "needs_boot": False}
@@ -756,6 +920,8 @@ def cmd_acquire(args):
             release_lock(mine["device_key"])
 
     explicit = bool(args.device)
+    gate = mem_policy(max_override=args.max_emulators, ignore=args.mem_override)
+    mem_blocked = False
     cands = gather_candidates(args.platform,
                               False if explicit else args.no_physical, warnings)
     if explicit:
@@ -770,6 +936,14 @@ def cmd_acquire(args):
         cands = matches[:1]
 
     for c in cands:
+        if c["needs_boot"] and gate["enabled"] and gate["blocked"]:
+            if explicit:
+                log(f"内存闸门告警({gate['reason']}),但按 --device 指定强制继续")
+            else:
+                if not mem_blocked:
+                    log(f"内存闸门:跳过启动停止态模拟器({gate['reason']})")
+                mem_blocked = True
+                continue
         meta = make_meta(c, owner, project, args.ttl)
         if not acquire_lock_with_reclaim(c["key"], meta):
             if explicit:
@@ -802,8 +976,16 @@ def cmd_acquire(args):
         emit(build_result(c, owner, project, created=False, booted=booted, reused=False))
 
     if args.no_create:
+        if mem_blocked:
+            fail(EXIT_MEMORY, "MEMORY_PRESSURE",
+                 f"停止态模拟器被内存闸门拦下,且 --no-create 禁止新建({gate['reason']})",
+                 hint=MEM_HINT)
         fail(EXIT_NO_DEVICE, "NO_DEVICE", "没有空闲设备,且 --no-create 禁止新建",
              hint="等待其他会话 release;或 status 查看占用")
+
+    if gate["enabled"] and gate["blocked"]:
+        fail(EXIT_MEMORY, "MEMORY_PRESSURE",
+             f"不再启动/新建模拟器:{gate['reason']}", hint=MEM_HINT)
 
     if args.platform == "any":
         create_order = ["ios", "android"] if have_simctl() else ["android"]
@@ -960,7 +1142,20 @@ def cmd_status(args):
                         "state": state, "reason": reason,
                         "owner_pid": (meta or {}).get("owner_pid"),
                         "project": (meta or {}).get("project")})
+    total, avail = mem_total_gb(), mem_available_gb()
+    max_vms = env_max_vms()
+    if max_vms is None:
+        max_vms = auto_max_vms(total)
+    running_vms = len(running_avds) + len(booted)
+    memory = {"total_gb": None if total is None else round(total, 1),
+              "available_gb": None if avail is None else round(avail, 1),
+              "running_vms": running_vms, "max_vms": max_vms,
+              "per_vm_gb": MEM_PER_VM_GB, "reserve_gb": MEM_RESERVE_GB,
+              "can_start_new_vm": ((max_vms is None or running_vms < max_vms)
+                                   and (avail is None
+                                        or avail >= MEM_PER_VM_GB + MEM_MIN_FREE_GB))}
     emit({"ok": True, "action": "status", "lock_root": lock_root(),
+          "memory": memory,
           "devices": devices, "orphan_locks": orphans, "warnings": warnings})
 
 
@@ -1000,6 +1195,11 @@ def main():
                    help="锁最大年龄(小时,默认 8)")
     a.add_argument("--timeout", type=int,
                    help="启动等待秒数(默认 Android 300 / iOS 180)")
+    a.add_argument("--max-emulators", type=int,
+                   help="并发模拟器总数上限(含 iOS Booted;默认按宿主内存自动推导,"
+                        "环境变量 AI_DEVICE_MAX_EMULATORS 亦可覆盖)")
+    a.add_argument("--mem-override", action="store_true",
+                   help="跳过内存闸门(等效 AI_DEVICE_MEM_OVERRIDE=1)")
 
     r = sub.add_parser("release", help="释放锁(幂等,恒 exit 0)")
     g = r.add_mutually_exclusive_group(required=True)

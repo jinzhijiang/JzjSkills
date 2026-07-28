@@ -44,6 +44,8 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 | `--project <path>` | 当前目录 | 记录占用方,亦是幂等重取的匹配键 |
 | `--ttl <小时>` | 8 | 本锁的最大年龄 |
 | `--timeout <秒>` | Android 300 / iOS 180 | 模拟器启动等待上限 |
+| `--max-emulators <N>` | 按内存自动 | 并发模拟器总数上限(Android 运行中 emulator + iOS Booted 合计;环境变量 `AI_DEVICE_MAX_EMULATORS` 亦可覆盖,显式值不受 1..4 夹取限制) |
+| `--mem-override` | 关 | 跳过内存闸门(等效环境变量 `AI_DEVICE_MEM_OVERRIDE=1`) |
 
 分配优先级(tier 间严格有序,tier 内确定性排序):
 
@@ -51,6 +53,15 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 2. **已在运行的空闲模拟器**:Android 运行中 emulator(按 AVD 名序)→ iOS Booted(`ai-test-*` 优先 → runtime 新 → iPhone 优先)
 3. **已停止的模拟器(启动它)**:Android `emulator -list-avds`(`ai-test-*` 优先 → 字母序)→ iOS Shutdown(同 2 排序)
 4. **新建**:命名 `ai-test-<时间戳>-<pid>`;`--platform any` 时先 iOS(创建+启动 ~30s,比 Android 冷启动轻)再 Android。Android 从已装 system-images 挑最高 API、`google_apis` 系 tag 优先、匹配宿主 abi(Apple Silicon → arm64-v8a);iOS 挑最新 runtime + 编号最大的 iPhone 机型
+
+### 内存闸门(tier 3 / 4 前置检查)
+
+启动或新建模拟器会增加宿主内存占用,过闸才执行;tier 1(真机)与 tier 2(已运行模拟器)不受影响。两项检查任一不过即拦截:
+
+1. **并发配额**:`运行中模拟器数 < max_vms`。运行数 = adb 可见的全部 `emulator-*` 串号(含 offline——卡死的 qemu 进程仍占内存)+ iOS Booted 模拟器。`max_vms` 取值优先级:`--max-emulators` > `AI_DEVICE_MAX_EMULATORS` > 自动推导 `clamp(⌊(总内存-8GB)/4GB⌋, 1..4)`(8GB→1,16GB→2,24GB+→4;每台按 ≈2GB guest RAM + QEMU/图形转发 ≈4GB 宿主开销估算)。
+2. **可用内存**:当前可用 ≥ 6GB(4GB 估算开销 + 2GB 安全垫)。macOS 按 `vm_stat` 的 free+inactive+purgeable+speculative 估算,Linux 用 `MemAvailable`,Windows 用 `GlobalMemoryStatusEx`。
+
+拦截行为:tier 3 候选被跳过(stderr 记一条日志);走到 tier 4 仍被拦 → exit 9 `MEMORY_PRESSURE`。三个豁免:`--device` 显式指定只告警不拦;幂等重取中重启自己已持有的模拟器不拦(净占用不增);内存探测失败自动放行(fail-open)。`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1` 整体跳过。
 
 成功 JSON(实际为单行,此处展开示意):
 
@@ -87,6 +98,8 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 
 ```json
 {"ok": true, "action": "status", "lock_root": "…",
+ "memory": {"total_gb": 16.0, "available_gb": 5.2, "running_vms": 1, "max_vms": 2,
+            "per_vm_gb": 4.0, "reserve_gb": 8.0, "can_start_new_vm": true},
  "devices": [{"key": "…", "platform": "…", "kind": "…", "device_id": "…", "name": "…",
               "state": "running|booted|stopped|shutdown|connected",
               "lock": null | {"state": "HELD|STALE", "reason": "dead_pid|ttl_expired|…",
@@ -115,6 +128,7 @@ acquire 遇到陈旧锁自动回收后抢占;`clean` 手动回收。
 | 6 | ENV_MISSING | 所选平台工具链缺失(无 Android SDK / 无 xcrun) |
 | 7 | BUSY | `--device` 指定的设备被存活锁占用 |
 | 8 | INTERNAL | 未预期异常(traceback 在 stderr) |
+| 9 | MEMORY_PRESSURE | 内存闸门拦截:配额已满或可用内存不足,不再启动/新建模拟器(真机不受影响) |
 
 ## 幂等与并发语义
 

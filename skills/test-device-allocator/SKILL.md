@@ -1,6 +1,6 @@
 ---
 name: test-device-allocator
-description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任何要把 Flutter / Android / iOS app 跑到真机或模拟器上做自动化测试、UI 探查、E2E 验证之前,先运行本 skill 的 scripts/device_lock.py acquire 领取一台空闲设备(优先空闲真机,其次已在运行的空闲模拟器,再启动已停止的模拟器,最后自动新建),拿到 JSON 里的 device id 后显式传给 flutter run -d / flutter drive -d / adb -s,测试完 release 释放。Flutter 项目未说明用什么平台、也没有开发平台特有功能时,默认用 Android 测试(acquire 默认即 android)。触发词:设备分配、分配模拟器、锁定设备、设备被占用、多项目同时测试、并发测试、抢设备、emulator、simulator、AVD、adb devices、xcrun simctl、模拟器互相污染。不适用于:单元测试与 Widget 测试(flutter test,不需要设备)、HarmonyOS 模拟器(用 deveco-studio-emulator)、用户手动开发调试自行选设备的场景。
+description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任何要把 Flutter / Android / iOS app 跑到真机或模拟器上做自动化测试、UI 探查、E2E 验证之前,先运行本 skill 的 scripts/device_lock.py acquire 领取一台空闲设备(优先空闲真机,其次已在运行的空闲模拟器,再启动已停止的模拟器,最后自动新建),拿到 JSON 里的 device id 后显式传给 flutter run -d / flutter drive -d / adb -s,测试完 release 释放。Flutter 项目未说明用什么平台、也没有开发平台特有功能时,默认用 Android 测试(acquire 默认即 android)。启动/新建模拟器前会按宿主内存自动限流,内存不足时报 MEMORY_PRESSURE 并建议改用真机,避免并发模拟器把整机拖进 swap 卡死。触发词:设备分配、分配模拟器、锁定设备、设备被占用、多项目同时测试、并发测试、抢设备、emulator、simulator、AVD、adb devices、xcrun simctl、模拟器互相污染、模拟器卡死、内存不足。不适用于:单元测试与 Widget 测试(flutter test,不需要设备)、HarmonyOS 模拟器(用 deveco-studio-emulator)、用户手动开发调试自行选设备的场景。
 ---
 
 # 并发测试设备分配(device_lock)
@@ -36,7 +36,7 @@ description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任
 
 | 子命令 | 用途 | 常用参数 |
 |---|---|---|
-| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|any`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>` |
+| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|any`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--mem-override` 跳过内存闸门 |
 | `release` | 释放锁(幂等,恒 exit 0) | `--key <device_key>` / `--device <id>` / `--all-mine` |
 | `status` | 设备 × 锁全景(排查谁占了什么) | 无 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
@@ -65,13 +65,14 @@ flutter run -d "$DEVICE_ID"                     # 或 flutter_skill launch -d "$
 python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 ```
 
-- acquire 失败时 exit code 非 0,stdout JSON 带 `error/message/hint`:`NO_SYSTEM_IMAGE`(4)→ 按 hint 跑 sdkmanager 装镜像后重试;`BUSY`(7)→ 指定的设备被占,去掉 `--device` 让脚本另挑。
+- acquire 失败时 exit code 非 0,stdout JSON 带 `error/message/hint`:`NO_SYSTEM_IMAGE`(4)→ 按 hint 跑 sdkmanager 装镜像后重试;`BUSY`(7)→ 指定的设备被占,去掉 `--device` 让脚本另挑;`MEMORY_PRESSURE`(9)→ 宿主内存不够再开一台模拟器,优先真机/已运行设备或按 hint 释放内存。
 - fvm 项目按 flutter-use-fvm 规则把 `flutter` 换成 `fvm flutter`;`device_lock.py` 本身不经 fvm。
 
 ## 分配策略与锁语义
 
 优先级(tier 间严格有序):**空闲真机** > 已在运行的空闲模拟器 > 启动已停止的 AVD / 模拟器 > 新建(`ai-test-*` 命名;`--platform any` 时先建 iOS 模拟器,更快)。
 
+- **内存闸门(启动模拟器数量随宿主内存自适应)**:后两个 tier(启动已停止 / 新建)执行前做双重检查——并发配额 `clamp((总内存-8GB)/4GB, 1..4)`(16GB 机 → 最多 2 台,含 iOS Booted;卡死 offline 的模拟器进程也计入)+ 当前可用内存 ≥ 6GB。不过闸则跳过这两个 tier,真机与已运行模拟器不受影响;全部无路可走时报 `MEMORY_PRESSURE`(exit 9)。`--device` 显式指定时只告警不拦截;幂等重取重启自己已持有的模拟器不拦截;探测失败自动放行。覆盖手段:`--max-emulators <N>` / 环境变量 `AI_DEVICE_MAX_EMULATORS`、`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1`。
 - 上锁 = 原子创建 `~/.ai-device-locks/<key>/`,内含 meta.json(owner_pid、project、时间、TTL)。
 - 陈旧回收:owner 进程已死 → 立即可回收;存活但锁龄超 TTL(默认 8h)→ 可回收。长时间压测传大 `--ttl`。
 - **release 只还锁,模拟器保持运行**,给下个会话热复用;彻底关机 / 删除 `ai-test-*` 模拟器的手动命令见 [references/troubleshooting.md](references/troubleshooting.md)。
@@ -89,6 +90,8 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | acquire 卡 1-5 分钟 | 正在冷启动模拟器(Android 上限 300s / iOS 180s)。急用可 `--no-create` 或 `--device` 指定现成设备 |
 | exit 4 `NO_SYSTEM_IMAGE` | 复制 JSON `hint` 里的 sdkmanager 命令装镜像,再重跑 acquire |
 | exit 7 `BUSY` | `--device` 指定的设备被别的会话占用;去掉 `--device` 另挑,或 `status` 看占用者 |
+| exit 9 `MEMORY_PRESSURE` | 宿主内存不够再开一台模拟器。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)后重试;确认有余量可 `--mem-override` 或调 `--max-emulators` |
+| 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
 | 忘了 release / 会话崩了 | 下次 acquire 自动回收死 pid 的锁;不放心跑 `clean` |
 | flutter 挑错设备 | 说明有命令没带 `-d`;全链路显式传 device id |
