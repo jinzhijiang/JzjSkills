@@ -50,7 +50,7 @@ python3 <skill根>/scripts/device_lock.py clean --all
 | 6 ENV_MISSING | 平台工具链缺失 | 装 Android SDK / Xcode;Linux 宿主不支持 iOS |
 | 7 BUSY | `--device` 指定的设备被占 | 去掉 `--device` 另挑;或 `status` 看占用者是谁 |
 | 8 INTERNAL | 未预期异常 | 看 stderr 的 traceback 排查 |
-| 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满或可用内存 < 6GB) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)后重试;确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
+| 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满或可用内存不足每台开销 + 2GB) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)后重试;Android 可 `--memory 1024` 压小单台换配额;确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
 
 ## 模拟器卡死(内存超卖)
 
@@ -62,7 +62,8 @@ python3 <skill根>/scripts/device_lock.py clean --all
 1. 冻住的模拟器救不回来,直接冷关:`adb -s <id> emu kill`;没响应就 `pkill -f qemu-system`(或按 pid 杀)。
 2. `adb kill-server && adb start-server` 只能修 adb 连接,救不了 QEMU 本体。
 3. 减少并发:内存闸门(见 cli.md)默认就按宿主内存限流;16GB 机器建议同时最多 1-2 台,并发会话优先领真机。
-4. `status` 输出里的 `memory` 字段可直接看 `available_gb` / `running_vms` / `can_start_new_vm`。
+4. 减少单台占用:acquire 传 `--memory 1024`(仅 Android),每台开销从 4.0GB 降到 2.5GB,16GB 机上配额随之从 2 台变 3 台。代价是 guest 内存紧张——低于 2048MB 时 API 31+ 镜像的 lowmemorykiller 可能杀掉被测 app,重 app 别压太狠。
+5. `status` 输出里的 `memory` 字段可直接看 `available_gb` / `running_vms` / `can_start_new_vm`,`devices[].ram_mb` 看每台 AVD 配了多少 guest RAM。
 
 ## 边界行为速查
 
@@ -74,3 +75,6 @@ python3 <skill根>/scripts/device_lock.py clean --all
 - 锁着的模拟器被人手动关掉:锁不会被误回收;持有者下次幂等 acquire 会自动把它重新启动(此重启不过内存闸门——净占用不增)。
 - offline / 卡死的模拟器串号计入内存配额(qemu 进程还活着就仍占内存);想释放配额先把它冷关掉。
 - 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。
+- `--memory` 只在**需要启动**模拟器时才有意义:领到真机、或复用已经跑着的模拟器时无效(跑起来的 VM 改不了 RAM),此时结果 JSON 的 `memory_mb` 为 null。
+- `--memory` 只对本工具新建的 AVD 写 `config.ini`;启动用户自己的 AVD(如 Pixel_10)只覆盖本次运行,不改他们的配置。手动持久修改:改 `~/.android/avd/<名>.avd/config.ini` 的 `hw.ramSize`(纯数字按 MB 解释)。
+- 改了 RAM 的那次启动一定是冷启动(quickboot 快照要求 RAM 一致),acquire 会慢 1-2 分钟;之后维持同一值就能继续吃快照。

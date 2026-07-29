@@ -45,9 +45,16 @@ EXIT_MEMORY = 9
 # 内存闸门:启动/新建模拟器前按宿主内存核算,避免超卖把整机拖进 swap(模拟器整体
 # 冻结的常见根因)。真机与已在运行的模拟器不受影响;探测失败自动放行(fail-open)。
 MEM_RESERVE_GB = 8.0    # 预留给 OS / IDE / 构建进程的基线内存
-MEM_PER_VM_GB = 4.0     # 每台模拟器的估算宿主开销(约 2GB guest RAM + QEMU/图形转发)
+MEM_PER_VM_GB = 4.0     # 未指定 --memory 时每台的估算宿主开销(≈2GB guest RAM + 转发)
+MEM_VM_OVERHEAD_GB = 1.5  # 指定 --memory 时,guest RAM 之外的宿主开销(QEMU + 图形转发)
 MEM_MIN_FREE_GB = 2.0   # 启动新 VM 时,估算开销之外还需的安全垫
 MEM_MAX_VMS_CAP = 4     # 自动配额上限(--max-emulators / AI_DEVICE_MAX_EMULATORS 可突破)
+
+# --memory:Android 模拟器 guest RAM(emulator -memory / config.ini hw.ramSize)。
+# iOS 模拟器不是 VM,simctl 没有等价旋钮,只能靠限制台数。
+EMU_MEM_MIN_MB = 512     # emulator 本身允许到 128,但低于此系统起不来
+EMU_MEM_MAX_MB = 8192    # emulator -memory 上限
+EMU_MEM_WARN_MB = 2048   # 低于此,API 31+ 镜像的 lowmemorykiller 容易杀掉被测 app
 
 _ACTION = "device_lock"
 
@@ -250,12 +257,19 @@ def mem_available_gb():
     return None
 
 
-def auto_max_vms(total_gb):
+def per_vm_gb(memory_mb=None):
+    """每台模拟器的估算宿主开销:显式 --memory 时按 guest RAM + 固定开销推导。"""
+    if not memory_mb:
+        return MEM_PER_VM_GB
+    return round(memory_mb / 1024.0 + MEM_VM_OVERHEAD_GB, 1)
+
+
+def auto_max_vms(total_gb, memory_mb=None):
     """按总内存推导并发模拟器上限:(总量-预留)/每台开销,夹在 [1, CAP]。"""
     if total_gb is None:
         return None
     return max(1, min(MEM_MAX_VMS_CAP,
-                      int((total_gb - MEM_RESERVE_GB) // MEM_PER_VM_GB)))
+                      int((total_gb - MEM_RESERVE_GB) // per_vm_gb(memory_mb))))
 
 
 def env_max_vms():
@@ -281,12 +295,18 @@ def running_vm_count():
     return n
 
 
-def mem_policy(max_override=None, ignore=False):
-    """评估内存闸门,返回 dict。enabled=False 表示不拦截(显式覆盖或探测失败)。"""
+def mem_policy(max_override=None, ignore=False, memory_mb=None):
+    """评估内存闸门,返回 dict。enabled=False 表示不拦截(显式覆盖或探测失败)。
+
+    memory_mb 为本次将施加的 guest RAM(仅 --platform android 传入):每台开销按它
+    推导,压小内存就能多跑一台。
+    """
+    vm_gb = per_vm_gb(memory_mb)
     info = {"enabled": True, "blocked": False, "reason": None,
             "total_gb": None, "available_gb": None,
             "running_vms": None, "max_vms": None,
-            "need_gb": round(MEM_PER_VM_GB + MEM_MIN_FREE_GB, 1)}
+            "per_vm_gb": vm_gb, "memory_mb": memory_mb,
+            "need_gb": round(vm_gb + MEM_MIN_FREE_GB, 1)}
     if ignore or os.environ.get("AI_DEVICE_MEM_OVERRIDE", "").lower() in ("1", "true", "yes"):
         info["enabled"] = False
         return info
@@ -295,26 +315,28 @@ def mem_policy(max_override=None, ignore=False):
     info["available_gb"] = None if avail is None else round(avail, 1)
     max_vms = max_override if max_override is not None else env_max_vms()
     if max_vms is None:
-        max_vms = auto_max_vms(total)
+        max_vms = auto_max_vms(total, memory_mb)
     info["max_vms"] = max_vms
     if max_vms is None and avail is None:
         info["enabled"] = False  # 全部探测失败,放行
         return info
     running = running_vm_count()
     info["running_vms"] = running
+    sized = f"(按每台 {vm_gb}GB" + (f" / guest RAM {memory_mb}MB)" if memory_mb else ")")
     if max_vms is not None and running >= max_vms:
         info["blocked"] = True
         info["reason"] = (f"并发配额已满:宿主内存 {info['total_gb']}GB 对应上限 "
-                          f"{max_vms} 台模拟器,当前已有 {running} 台在运行")
-    elif avail is not None and avail < MEM_PER_VM_GB + MEM_MIN_FREE_GB:
+                          f"{max_vms} 台模拟器{sized},当前已有 {running} 台在运行")
+    elif avail is not None and avail < vm_gb + MEM_MIN_FREE_GB:
         info["blocked"] = True
         info["reason"] = (f"可用内存不足:当前约 {info['available_gb']}GB,"
-                          f"再启动一台估算需 {info['need_gb']}GB")
+                          f"再启动一台估算需 {info['need_gb']}GB{sized}")
     return info
 
 
 MEM_HINT = ("优先领真机或复用已在运行的空闲模拟器;关闭闲置模拟器释放内存"
             "(adb -s <id> emu kill / xcrun simctl shutdown <udid>)后重试;"
+            "Android 可用 --memory <MB> 压低单台 guest RAM 换取配额(如 1024);"
             "确认内存有余量时可 --mem-override 跳过,或用 --max-emulators / "
             "环境变量 AI_DEVICE_MAX_EMULATORS 调整上限")
 
@@ -537,6 +559,83 @@ def list_avds():
             if s and AVD_NAME_RE.match(s)]
 
 
+def avd_home():
+    """AVD 存放目录:ANDROID_AVD_HOME → <ANDROID_SDK_HOME|ANDROID_USER_HOME|~>/.android/avd。"""
+    v = os.environ.get("ANDROID_AVD_HOME")
+    if v and os.path.isdir(v):
+        return v
+    for base in (os.environ.get("ANDROID_SDK_HOME"), os.environ.get("ANDROID_USER_HOME"),
+                 os.path.expanduser("~")):
+        if not base:
+            continue
+        d = (base if os.path.basename(base) == ".android"
+             else os.path.join(base, ".android"))
+        d = os.path.join(d, "avd")
+        if os.path.isdir(d):
+            return d
+    return None
+
+
+def avd_config_path(name):
+    home = avd_home()
+    if not home or not AVD_NAME_RE.match(name or ""):
+        return None
+    p = os.path.join(home, f"{name}.avd", "config.ini")
+    return p if os.path.isfile(p) else None
+
+
+def parse_ram_mb(value):
+    """config.ini 的 hw.ramSize 可写成 2048 / 2048M / 2G,统一归一到 MB。"""
+    m = re.match(r"^\s*(\d+)\s*([MmGg]?)", value or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n * 1024 if m.group(2).lower() == "g" else n
+
+
+def avd_ram_mb(name):
+    """AVD 配置里的 guest RAM(MB);读不到返回 None。"""
+    path = avd_config_path(name)
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.strip().startswith("hw.ramSize"):
+                    return parse_ram_mb(line.split("=", 1)[-1])
+    except OSError:
+        return None
+    return None
+
+
+def set_avd_ram_mb(name, mb):
+    """把 hw.ramSize 写进 config.ini(只对本工具新建的 AVD 用,别改用户的)。"""
+    path = avd_config_path(name)
+    if not path:
+        return False, "找不到 config.ini"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        out, done = [], False
+        for line in lines:
+            if line.strip().startswith("hw.ramSize"):
+                if done:
+                    continue
+                out.append(f"hw.ramSize={mb}")
+                done = True
+            else:
+                out.append(line)
+        if not done:
+            out.append(f"hw.ramSize={mb}")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+        os.replace(tmp, path)
+        return True, None
+    except OSError as e:
+        return False, str(e)
+
+
 def simctl_json(*args):
     """CoreSimulator 服务繁忙时(如模拟器刚启动)会瞬时失败,重试一次。"""
     if not have_simctl():
@@ -710,12 +809,17 @@ def pick_system_image():
     return found[0][2]
 
 
-def create_avd(name, pkg):
+def create_avd(name, pkg, memory_mb=None):
     avdmanager = tool("avdmanager")
     rc, out, err = run([avdmanager, "create", "avd", "-n", name, "-k", pkg, "--force"],
                        timeout=CREATE_AVD_TIMEOUT, input_text="no\n")
     if rc != 0:
         return False, ((err or out) or "").strip()[:300]
+    if memory_mb:
+        # 落到 config.ini,后续任何人启动这台(含不带 --memory)都按此内存跑
+        ok, werr = set_avd_ram_mb(name, memory_mb)
+        log(f"{name} guest RAM 设为 {memory_mb}MB" if ok
+            else f"{name} 写入 hw.ramSize 失败({werr}),本次仅靠 -memory 生效")
     return True, None
 
 
@@ -754,7 +858,7 @@ def create_sim(name, devtype, runtime):
 
 # ---------- 启动 / 就绪层 ----------
 
-def boot_avd(avd, headless, timeout):
+def boot_avd(avd, headless, timeout, memory_mb=None):
     emu, adb = tool("emulator"), tool("adb")
     if not emu or not adb:
         raise BootFailure("缺少 emulator/adb(检查 Android SDK)")
@@ -762,7 +866,14 @@ def boot_avd(avd, headless, timeout):
     cmd = [emu, "-avd", avd, "-no-audio", "-no-boot-anim"]
     if headless:
         cmd.append("-no-window")
-    log(f"启动 Android 模拟器 {avd}(约 30-120s)…")
+    if memory_mb:
+        cmd += ["-memory", str(memory_mb)]
+        configured = avd_ram_mb(avd)
+        if configured and configured != memory_mb:
+            log(f"{avd} 配置的 {configured}MB 本次被 -memory {memory_mb} 覆盖"
+                f"(仅本次运行,不改 config.ini);RAM 变了 quickboot 快照失效,本次冷启动")
+    log(f"启动 Android 模拟器 {avd}"
+        + (f"(guest RAM {memory_mb}MB,约 30-120s)…" if memory_mb else "(约 30-120s)…"))
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
@@ -843,6 +954,7 @@ def build_result(c, owner, project, created, booted, reused):
     return {"ok": True, "action": "acquire",
             "device_key": c["key"], "platform": c["platform"], "kind": c["kind"],
             "device_id": dev, "name": c["name"],
+            "memory_mb": c.get("memory_mb"),
             "created": created, "booted": booted, "reused": reused,
             "owner_pid": owner, "project": project,
             "lock_dir": lock_dir(c["key"]),
@@ -856,13 +968,44 @@ def make_meta(c, owner, project, ttl, created=False, booted=False):
             "device_id": c["device_id"], "name": c["name"],
             "owner_pid": owner, "project": project,
             "acquired_at": now_iso(), "ttl_hours": ttl,
-            "created_by_allocator": created, "booted_by_allocator": booted}
+            "created_by_allocator": created, "booted_by_allocator": booted,
+            "memory_mb": c.get("memory_mb")}
 
 
 def timeout_for(args, platform_):
     if args.timeout:
         return args.timeout
     return ANDROID_BOOT_TIMEOUT if platform_ == "android" else IOS_BOOT_TIMEOUT
+
+
+def resolve_memory_mb(cli_value):
+    """--memory > AI_DEVICE_EMULATOR_MEMORY > 不指定(用 AVD 自带的 hw.ramSize)。"""
+    raw = cli_value
+    src = "--memory"
+    if raw is None:
+        env = os.environ.get("AI_DEVICE_EMULATOR_MEMORY", "").strip()
+        if not env:
+            return None
+        src = "AI_DEVICE_EMULATOR_MEMORY"
+        try:
+            raw = int(env)
+        except ValueError:
+            fail(EXIT_ARGS, "ARGS", f"{src} 不是整数: {env!r}")
+    if raw < EMU_MEM_MIN_MB or raw > EMU_MEM_MAX_MB:
+        fail(EXIT_ARGS, "ARGS",
+             f"{src} 需在 {EMU_MEM_MIN_MB}-{EMU_MEM_MAX_MB} MB 之间,收到 {raw}")
+    if raw < EMU_MEM_WARN_MB:
+        log(f"警告:guest RAM {raw}MB 低于 {EMU_MEM_WARN_MB}MB,"
+            f"API 31+ 镜像可能触发 lowmemorykiller 杀掉被测 app"
+            f"(表现为莫名的 Lost connection to device)")
+    return raw
+
+
+def emu_memory_for(c, memory_mb):
+    """-memory 只对 Android 模拟器有意义;真机与 iOS 模拟器没有这个旋钮。"""
+    if memory_mb and c["platform"] == "android" and c["kind"] == "emulator":
+        return memory_mb
+    return None
 
 
 def reuse_existing(meta, args, warnings):
@@ -872,7 +1015,8 @@ def reuse_existing(meta, args, warnings):
     """
     c = {"tier": 0, "platform": meta["platform"], "kind": meta["kind"],
          "key": meta["device_key"], "name": meta.get("name"),
-         "device_id": meta.get("device_id"), "needs_boot": False}
+         "device_id": meta.get("device_id"), "needs_boot": False,
+         "memory_mb": meta.get("memory_mb")}
     if meta["kind"] == "physical":
         return c
     if meta["platform"] == "android":
@@ -884,8 +1028,12 @@ def reuse_existing(meta, args, warnings):
             if d["is_emulator"] and avd_for_serial(adb, d["serial"]) == meta.get("name"):
                 c["device_id"] = d["serial"]
                 return c
-        c["device_id"] = boot_avd(meta["name"], args.headless, timeout_for(args, "android"))
-        update_lock(c["key"], device_id=c["device_id"], booted_by_allocator=True)
+        # 重启已持有的 AVD:沿用当初的内存设定,避免 RAM 变动再作废一次快照
+        c["memory_mb"] = emu_memory_for(c, args.memory or meta.get("memory_mb"))
+        c["device_id"] = boot_avd(meta["name"], args.headless, timeout_for(args, "android"),
+                                  c["memory_mb"])
+        update_lock(c["key"], device_id=c["device_id"], booted_by_allocator=True,
+                    memory_mb=c["memory_mb"])
         return c
     boot_sim(meta["device_id"], args.headless, timeout_for(args, "ios"))
     return c
@@ -903,6 +1051,9 @@ def cmd_acquire(args):
     if args.platform == "ios" and not have_simctl():
         fail(EXIT_ENV_MISSING, "ENV_MISSING",
              "本机没有 xcrun/simctl,无法分配 iOS 设备(iOS 仅支持 macOS + Xcode)")
+    args.memory = resolve_memory_mb(args.memory)
+    if args.memory and args.platform == "ios":
+        warnings.append("--memory 仅对 Android 模拟器生效,iOS 模拟器不是 VM,本次忽略")
 
     # 幂等重取:同 owner + project 的存活锁直接复用,不多占设备
     mine = find_my_lock(owner, project)
@@ -920,7 +1071,10 @@ def cmd_acquire(args):
             release_lock(mine["device_key"])
 
     explicit = bool(args.device)
-    gate = mem_policy(max_override=args.max_emulators, ignore=args.mem_override)
+    # 只有 --platform android 才能确定新起的是 Android 模拟器,按 --memory 收窄每台开销;
+    # any / ios 可能落到无法限内存的 iOS 模拟器上,仍按保守默认估算。
+    gate = mem_policy(max_override=args.max_emulators, ignore=args.mem_override,
+                      memory_mb=args.memory if args.platform == "android" else None)
     mem_blocked = False
     cands = gather_candidates(args.platform,
                               False if explicit else args.no_physical, warnings)
@@ -944,6 +1098,8 @@ def cmd_acquire(args):
                     log(f"内存闸门:跳过启动停止态模拟器({gate['reason']})")
                 mem_blocked = True
                 continue
+        # 只有真要启动它时才谈内存;复用已在跑的模拟器改不了它的 RAM
+        c["memory_mb"] = emu_memory_for(c, args.memory) if c["needs_boot"] else None
         meta = make_meta(c, owner, project, args.ttl)
         if not acquire_lock_with_reclaim(c["key"], meta):
             if explicit:
@@ -958,7 +1114,8 @@ def cmd_acquire(args):
             if c["needs_boot"]:
                 if c["platform"] == "android":
                     c["device_id"] = boot_avd(c["name"], args.headless,
-                                              timeout_for(args, "android"))
+                                              timeout_for(args, "android"),
+                                              c["memory_mb"])
                 else:
                     boot_sim(c["device_id"], args.headless, timeout_for(args, "ios"))
                 booted = True
@@ -1029,14 +1186,16 @@ def cmd_acquire(args):
                      hint=f'"{sm}" "system-images;android-36;google_apis;{host_abi()}" '
                           f'安装后重试;许可证问题先 yes | "{sm}" --licenses')
             log(f"无空闲设备,新建 Android AVD {name}({pkg})…")
-            ok, err = create_avd(name, pkg)
+            ok, err = create_avd(name, pkg, args.memory)
             if not ok:
                 fail(EXIT_INTERNAL, "INTERNAL", f"avdmanager create 失败: {err}",
                      hint="若提示许可证未接受: yes | sdkmanager --licenses")
             c = cand(4, "android", "emulator", f"android-avd:{name}", name, None, True)
+            c["memory_mb"] = args.memory
             try_lock(c["key"], make_meta(c, owner, project, args.ttl, created=True))
             try:
-                c["device_id"] = boot_avd(name, args.headless, timeout_for(args, "android"))
+                c["device_id"] = boot_avd(name, args.headless, timeout_for(args, "android"),
+                                          c["memory_mb"])
             except BootFailure as e:
                 release_lock(c["key"])
                 fail(EXIT_BOOT_TIMEOUT, "BOOT_TIMEOUT", f"新建 AVD {name} 启动失败: {e}")
@@ -1102,10 +1261,10 @@ def cmd_status(args):
                          "created_by_allocator": meta.get("created_by_allocator", False)})
         return view
 
-    def add(key, platform_, kind, device_id, name, dstate):
+    def add(key, platform_, kind, device_id, name, dstate, ram_mb=None):
         devices.append({"key": key, "platform": platform_, "kind": kind,
                         "device_id": device_id, "name": name, "state": dstate,
-                        "lock": lock_view(key)})
+                        "ram_mb": ram_mb, "lock": lock_view(key)})
 
     devs, adb = adb_devices(warnings)
     running_avds = {}
@@ -1120,10 +1279,12 @@ def cmd_status(args):
             add(f"android-device:{d['serial']}", "android", "physical",
                 d["serial"], d["serial"], "running")
     for avd, serial in sorted(running_avds.items()):
-        add(f"android-avd:{avd}", "android", "emulator", serial, avd, "running")
+        add(f"android-avd:{avd}", "android", "emulator", serial, avd, "running",
+            avd_ram_mb(avd))
     for avd in sorted(list_avds()):
         if avd not in running_avds:
-            add(f"android-avd:{avd}", "android", "emulator", None, avd, "stopped")
+            add(f"android-avd:{avd}", "android", "emulator", None, avd, "stopped",
+                avd_ram_mb(avd))
     for d in ios_physicals(warnings):
         add(f"ios-device:{d['udid']}", "ios", "physical", d["udid"], d["name"], "connected")
     booted, shutdown = ios_sims()
@@ -1150,10 +1311,11 @@ def cmd_status(args):
     memory = {"total_gb": None if total is None else round(total, 1),
               "available_gb": None if avail is None else round(avail, 1),
               "running_vms": running_vms, "max_vms": max_vms,
-              "per_vm_gb": MEM_PER_VM_GB, "reserve_gb": MEM_RESERVE_GB,
+              "per_vm_gb": per_vm_gb(), "reserve_gb": MEM_RESERVE_GB,
+              "vm_overhead_gb": MEM_VM_OVERHEAD_GB,
               "can_start_new_vm": ((max_vms is None or running_vms < max_vms)
                                    and (avail is None
-                                        or avail >= MEM_PER_VM_GB + MEM_MIN_FREE_GB))}
+                                        or avail >= per_vm_gb() + MEM_MIN_FREE_GB))}
     emit({"ok": True, "action": "status", "lock_root": lock_root(),
           "memory": memory,
           "devices": devices, "orphan_locks": orphans, "warnings": warnings})
@@ -1200,6 +1362,11 @@ def main():
                         "环境变量 AI_DEVICE_MAX_EMULATORS 亦可覆盖)")
     a.add_argument("--mem-override", action="store_true",
                    help="跳过内存闸门(等效 AI_DEVICE_MEM_OVERRIDE=1)")
+    a.add_argument("--memory", type=int, metavar="MB",
+                   help=f"Android 模拟器 guest RAM({EMU_MEM_MIN_MB}-{EMU_MEM_MAX_MB} MB;"
+                        "新建的 AVD 写进 config.ini,启动已有 AVD 只本次覆盖);"
+                        "内存闸门的每台开销随之变小,压小可多跑一台。"
+                        "环境变量 AI_DEVICE_EMULATOR_MEMORY 亦可设定;iOS 模拟器不支持")
 
     r = sub.add_parser("release", help="释放锁(幂等,恒 exit 0)")
     g = r.add_mutually_exclusive_group(required=True)
