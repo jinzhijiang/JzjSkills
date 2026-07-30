@@ -23,7 +23,12 @@ JzjSkills/
 │   │   ├── SKILL.md
 │   │   ├── agents/openai.yaml
 │   │   ├── references/                  # cli.md、troubleshooting.md
-│   │   └── scripts/device_lock.py       # 本仓库唯一可执行脚本（python3 标准库）
+│   │   └── scripts/device_lock.py       # python3 标准库
+│   ├── flutter-google-play-release/     # 自建：Flutter Google Play 安全发布
+│   │   ├── SKILL.md
+│   │   ├── agents/openai.yaml
+│   │   ├── references/                  # 审计、Console、Android 质量
+│   │   └── scripts/verify_flutter_play_release.py
 │   └── …（spring-mvc-testing … 等 spring-* 结构同上；
 │           另有 13 个 flutter-* skill（10 个 Flutter 官方 + 3 个自建），
 │           其中 flutter-setup-firebase-crashlytics 含 references/ 与 agents/）
@@ -74,6 +79,7 @@ description: 简短描述这个 skill 做什么
 | `flutter-ui-automation` | 自建 / 内部整理 | 底层工具 [ai-dashboad/flutter-skill](https://github.com/ai-dashboad/flutter-skill)（本机用 [jinzhijiang](https://github.com/jinzhijiang/flutter-skill) fork） | — | 2026-07-06 | 自建；记录 `flutter_skill` 连接/探查用法，由 flutter_todo `.agents/skills` 移入并泛化为通用 Flutter 版 |
 | `flutter-setup-firebase-crashlytics` | 自建 / 内部整理 | [Firebase Flutter 官方文档](https://firebase.google.com/docs/flutter/setup) | — | 2026-07-18 | 自建；默认完整接入 Firebase Core、Google Analytics 与 Crashlytics，并要求设备上报验证和临时崩溃入口清理 |
 | `flutter-use-fvm` | 自建 / FVM 官方文档整理 | [FVM Documentation](https://fvm.app/documentation/getting-started/overview) | — | 2026-07-18 | 自建；强制 Flutter/Dart 命令通过 `fvm flutter` / `fvm dart` 执行，并按需覆盖完整配置、命令、IDE/CI 与故障排查 |
+| `flutter-google-play-release` | 自建 / Google Play 上架实操整理 | — | — | 2026-07-30 | 自建；Flutter Android 首发与更新的证据审计、商店资料、政策声明、IARC、AAB、质量建议和最终送审确认门 |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-07-26 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器 |
 
 ## 更新已引入的 Skill
