@@ -72,10 +72,10 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 
 优先级(tier 间严格有序):**空闲真机** > 已在运行的空闲模拟器 > 启动已停止的 AVD / 模拟器 > 新建(`ai-test-*` 命名;`--platform any` 时先建 iOS 模拟器,更快)。
 
-- **内存闸门(启动模拟器数量随宿主内存自适应)**:后两个 tier(启动已停止 / 新建)执行前做双重检查——并发配额 `clamp((总内存-8GB)/每台开销, 1..4)`(默认每台按 4GB 估算,16GB 机 → 最多 2 台,含 iOS Booted;卡死 offline 的模拟器进程也计入)+ 当前可用内存 ≥ 每台开销 + 2GB。不过闸则跳过这两个 tier,真机与已运行模拟器不受影响;全部无路可走时报 `MEMORY_PRESSURE`(exit 9)。`--device` 显式指定时只告警不拦截;幂等重取重启自己已持有的模拟器不拦截;探测失败自动放行。覆盖手段:`--max-emulators <N>` / 环境变量 `AI_DEVICE_MAX_EMULATORS`、`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1`。
+- **内存闸门(启动模拟器数量随宿主内存自适应)**:后两个 tier(启动已停止 / 新建)执行前做双重检查——并发配额 `clamp((总内存-8GB)/每台开销, 1..4)`(默认每台按 4GB 估算,16GB 机 → 最多 2 台,含 iOS Booted;卡死 offline 的模拟器进程也计入)+ 当前可用内存 ≥ 每台开销 + 2GB。**0 台模拟器在运行时,可用内存检查只告警不拦截**——闸门防的是并发互踩,第一台恒放行;因此 `MEMORY_PRESSURE` 只会在已有模拟器在跑时出现。macOS 可用内存按内核 memorystatus 水位(`sysctl kern.memorystatus_level`,把压缩器与文件缓存的可回收量算在内)估算,vm_stat 口径兜底。不过闸则跳过这两个 tier,真机与已运行模拟器不受影响;全部无路可走时报 `MEMORY_PRESSURE`(exit 9)。`--device` 显式指定时只告警不拦截;幂等重取重启自己已持有的模拟器不拦截;探测失败自动放行。覆盖手段:`--max-emulators <N>` / 环境变量 `AI_DEVICE_MAX_EMULATORS`、`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1`。
 - **单台内存(`--memory <MB>`,仅 Android)**:传了就走 `emulator -memory`,新建的 AVD 同时写进 `config.ini` 的 `hw.ramSize`(启动已有 AVD 只覆盖本次,不动它的配置)。每台开销随之改为 `guest RAM + 1.5GB`,所以压小内存能换配额:16GB 机上默认 2 台,`--memory 1024` → 3 台。低于 2048MB 会告警(API 31+ 镜像的 lowmemorykiller 可能杀掉被测 app);RAM 与 AVD 配置不一致会作废 quickboot 快照,那次是冷启动。iOS 模拟器不是 VM,simctl 没有等价旋钮,只能靠限台数。
 - 上锁 = 原子创建 `~/.ai-device-locks/<key>/`,内含 meta.json(owner_pid、project、时间、TTL)。
-- 陈旧回收:owner 进程已死 → 立即可回收;存活但锁龄超 TTL(默认 8h)→ 可回收。长时间压测传大 `--ttl`。
+- 陈旧回收:owner 进程已死 → 立即可回收;存活但锁龄超 TTL(默认 8h)→ 可回收。每次 acquire 起手会**全局清扫**所有陈旧锁(不限本次要用的设备),死锁不会在注册表里躺尸。长时间压测传大 `--ttl`。
 - **release 只还锁,模拟器保持运行**,给下个会话热复用;彻底关机 / 删除 `ai-test-*` 模拟器的手动命令见 [references/troubleshooting.md](references/troubleshooting.md)。
 
 ## 与其他 skill 配合
@@ -91,10 +91,10 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | acquire 卡 1-5 分钟 | 正在冷启动模拟器(Android 上限 300s / iOS 180s)。急用可 `--no-create` 或 `--device` 指定现成设备 |
 | exit 4 `NO_SYSTEM_IMAGE` | 复制 JSON `hint` 里的 sdkmanager 命令装镜像,再重跑 acquire |
 | exit 7 `BUSY` | `--device` 指定的设备被别的会话占用;去掉 `--device` 另挑,或 `status` 看占用者 |
-| exit 9 `MEMORY_PRESSURE` | 宿主内存不够再开一台模拟器。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)后重试;Android 可 `--memory 1024` 压小单台换配额;确认有余量可 `--mem-override` 或调 `--max-emulators` |
+| exit 9 `MEMORY_PRESSURE` | 已有模拟器在跑、宿主内存不够再开一台(0 台在跑时不会出现此错)。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)后重试;Android 可 `--memory 1024` 压小单台换配额;确认有余量可 `--mem-override` 或调 `--max-emulators` |
 | 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
-| 忘了 release / 会话崩了 | 下次 acquire 自动回收死 pid 的锁;不放心跑 `clean` |
+| 忘了 release / 会话崩了 | 下次任意 acquire 起手全局回收死 pid / 超 TTL 的锁;不放心跑 `clean` |
 | flutter 挑错设备 | 说明有命令没带 `-d`;全链路显式传 device id |
 | Linux 宿主要 iOS | 不支持,`--platform ios` 报 exit 6;`any` 自动只用 Android |
 

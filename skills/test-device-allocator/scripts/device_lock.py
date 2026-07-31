@@ -224,10 +224,21 @@ def mem_total_gb():
 def mem_available_gb():
     """当前可用内存(GB),口径尽量贴近 Linux MemAvailable;失败返回 None。
 
-    macOS 的 free 页远低估真实可用量,按 free+inactive+purgeable+speculative 估算。
+    macOS 首选内核 memorystatus 水位(`sysctl kern.memorystatus_level`,即
+    memory_pressure 报告的 free percentage):压缩器与文件缓存的可回收量都在
+    口径内。vm_stat 的 free+inactive+purgeable+speculative 显著低估——机器
+    正常干活时它常年只剩 1-3GB,曾把 16GB 宿主上「0 台模拟器在跑」的首台
+    申请都判成 MEMORY_PRESSURE——降为兜底。
     """
     try:
         if sys.platform == "darwin":
+            total = mem_total_gb()
+            rc, out, _ = run(["sysctl", "-n", "kern.memorystatus_level"],
+                             timeout=5)
+            if rc == 0 and total:
+                level = out.strip()
+                if level.isdigit() and 0 < int(level) <= 100:
+                    return total * int(level) / 100.0
             rc, out, _ = run(["vm_stat"], timeout=5)
             if rc != 0:
                 return None
@@ -328,9 +339,17 @@ def mem_policy(max_override=None, ignore=False, memory_mb=None):
         info["reason"] = (f"并发配额已满:宿主内存 {info['total_gb']}GB 对应上限 "
                           f"{max_vms} 台模拟器{sized},当前已有 {running} 台在运行")
     elif avail is not None and avail < vm_gb + MEM_MIN_FREE_GB:
-        info["blocked"] = True
-        info["reason"] = (f"可用内存不足:当前约 {info['available_gb']}GB,"
-                          f"再启动一台估算需 {info['need_gb']}GB{sized}")
+        if running == 0:
+            # 闸门的使命是防「并发」模拟器互相拖垮;一台都没跑时不拦第一台,
+            # 只告警。操作系统吃满内存是常态(缓存/压缩器),静态阈值在
+            # running=0 时必然误杀,而配额下限本就是 1。
+            info["warning"] = (f"可用内存偏紧:约 {info['available_gb']}GB,"
+                               f"估算需 {info['need_gb']}GB{sized};当前 0 台"
+                               f"模拟器在运行,放行第一台")
+        else:
+            info["blocked"] = True
+            info["reason"] = (f"可用内存不足:当前约 {info['available_gb']}GB,"
+                              f"再启动一台估算需 {info['need_gb']}GB{sized}")
     return info
 
 
@@ -496,6 +515,23 @@ def acquire_lock_with_reclaim(key, meta):
     elif state == "FREE":
         return try_lock(key, meta)
     return False
+
+
+def sweep_stale_locks():
+    """acquire 起手的全局陈旧锁回收:owner 已死 / 超 TTL 的锁就地清掉。
+
+    [acquire_lock_with_reclaim] 只在轮到那台设备时才回收它的锁;真机永远
+    排第一,挂在停止态模拟器上的死锁曾因此躺过 48 小时——status 一直显示
+    「被占用」,与事实相悖。并发安全:reclaim_path 先原子 rename 再删,
+    两个会话同时清扫只有一个赢家,输家静默跳过。
+    """
+    removed = []
+    for dirname, meta, path in list_locks():
+        state, reason = eval_lock(path, meta)
+        if state == "STALE" and reclaim_path(path):
+            removed.append(f"{(meta or {}).get('device_key', dirname)}({reason})")
+    if removed:
+        log(f"回收陈旧锁: {', '.join(removed)}")
 
 
 # ---------- 枚举层 ----------
@@ -1048,6 +1084,7 @@ def cmd_acquire(args):
     owner = args.owner or default_owner_pid()
     project = os.path.abspath(args.project or os.getcwd())
     warnings = []
+    sweep_stale_locks()
     if args.platform == "ios" and not have_simctl():
         fail(EXIT_ENV_MISSING, "ENV_MISSING",
              "本机没有 xcrun/simctl,无法分配 iOS 设备(iOS 仅支持 macOS + Xcode)")
@@ -1089,6 +1126,7 @@ def cmd_acquire(args):
                  hint="运行 status 查看设备与锁全景")
         cands = matches[:1]
 
+    mem_warned = False
     for c in cands:
         if c["needs_boot"] and gate["enabled"] and gate["blocked"]:
             if explicit:
@@ -1098,6 +1136,10 @@ def cmd_acquire(args):
                     log(f"内存闸门:跳过启动停止态模拟器({gate['reason']})")
                 mem_blocked = True
                 continue
+        if c["needs_boot"] and gate.get("warning") and not mem_warned:
+            # 只在真要启动模拟器时提示;领到真机/已运行模拟器则与内存无关。
+            log(f"内存闸门:{gate['warning']}")
+            mem_warned = True
         # 只有真要启动它时才谈内存;复用已在跑的模拟器改不了它的 RAM
         c["memory_mb"] = emu_memory_for(c, args.memory) if c["needs_boot"] else None
         meta = make_meta(c, owner, project, args.ttl)
@@ -1143,6 +1185,9 @@ def cmd_acquire(args):
     if gate["enabled"] and gate["blocked"]:
         fail(EXIT_MEMORY, "MEMORY_PRESSURE",
              f"不再启动/新建模拟器:{gate['reason']}", hint=MEM_HINT)
+    if gate.get("warning") and not mem_warned:
+        log(f"内存闸门:{gate['warning']}")
+        mem_warned = True
 
     if args.platform == "any":
         create_order = ["ios", "android"] if have_simctl() else ["android"]
@@ -1308,14 +1353,16 @@ def cmd_status(args):
     if max_vms is None:
         max_vms = auto_max_vms(total)
     running_vms = len(running_avds) + len(booted)
+    # 与 mem_policy 同规则:0 台在跑时可用内存检查不拦第一台。
+    quota_ok = max_vms is None or running_vms < max_vms
+    avail_ok = (running_vms == 0 or avail is None
+                or avail >= per_vm_gb() + MEM_MIN_FREE_GB)
     memory = {"total_gb": None if total is None else round(total, 1),
               "available_gb": None if avail is None else round(avail, 1),
               "running_vms": running_vms, "max_vms": max_vms,
               "per_vm_gb": per_vm_gb(), "reserve_gb": MEM_RESERVE_GB,
               "vm_overhead_gb": MEM_VM_OVERHEAD_GB,
-              "can_start_new_vm": ((max_vms is None or running_vms < max_vms)
-                                   and (avail is None
-                                        or avail >= per_vm_gb() + MEM_MIN_FREE_GB))}
+              "can_start_new_vm": quota_ok and avail_ok}
     emit({"ok": True, "action": "status", "lock_root": lock_root(),
           "memory": memory,
           "devices": devices, "orphan_locks": orphans, "warnings": warnings})
