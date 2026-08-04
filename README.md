@@ -40,6 +40,12 @@ JzjSkills/
 │   │   ├── LICENSE                      # MIT，随上游一并保留
 │   │   ├── references/                  # prompt-recipes、boundaries
 │   │   └── scripts/codex_image.py       # python3 标准库，驱动 codex exec 出图
+│   ├── aliyun-oss-ossutil/              # 外部引入：阿里云 OSS ossutil 2.0 命令行
+│   │   ├── SKILL.md
+│   │   ├── LICENSE                      # MIT，取自上游仓库根目录
+│   │   ├── agents/openai.yaml
+│   │   ├── references/                  # install.md、sources.md
+│   │   └── scripts/check_ossutil.py     # python3 标准库，校验前置条件并留存证据
 │   └── …（spring-mvc-testing … 等 spring-* 结构同上；
 │           另有 13 个 flutter-* skill（10 个 Flutter 官方 + 3 个自建），
 │           其中 flutter-setup-firebase-crashlytics 含 references/ 与 agents/）
@@ -93,6 +99,7 @@ description: 简短描述这个 skill 做什么
 | `flutter-google-play-release` | 自建 / Google Play 上架实操整理 | — | — | 2026-07-30 | 自建；Flutter Android 首发与更新的证据审计、商店资料、政策声明、IARC、AAB、质量建议和最终送审确认门 |
 | `git-cz` | 自建 / 基于 [streamich/git-cz](https://github.com/streamich/git-cz) 整理 | [streamich/git-cz](https://github.com/streamich/git-cz)（npm `git-cz@4.9.0`，Unlicense） | — | 2026-08-04 | 自建；统一所有项目的提交信息风格：消息契约、`assets/changelog.config.js` 全局模板、`scripts/check_commit_msg.py`（python3 标准库，无 node 也能校验，可装成 commit-msg 钩子） |
 | `codex-image` | [xntj-ai/codex-image](https://github.com/xntj-ai/codex-image) | [仓库根目录即 skill](https://github.com/xntj-ai/codex-image) | MIT | 2026-08-04 | 原样引入（上游 `9b4e0bc`）；仓库根目录本身就是 skill，取 `SKILL.md` + `references/`（2 个文件）+ `scripts/codex_image.py`，并保留 `LICENSE`；未引入上游 `README.md`、`.gitignore` |
+| `aliyun-oss-ossutil` | [cinience/alicloud-skills](https://github.com/cinience/alicloud-skills) | [skills/storage/oss/aliyun-oss-ossutil/](https://github.com/cinience/alicloud-skills/tree/main/skills/storage/oss/aliyun-oss-ossutil) | MIT | 2026-08-04 | 引入上游 `b22dc0a`；上游按 `storage/oss/` 分层存放，这里拍平为 `skills/aliyun-oss-ossutil/`，因此改了两处写死的旧路径（`SKILL.md` 的校验命令、`scripts/check_ossutil.py` 改为按 `__file__` 自定位），其余原样；`LICENSE` 取自上游仓库根目录 |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-04 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`），并在 acquire 后自动亮屏解锁、release 时还原屏幕设置 |
 
 ## 更新已引入的 Skill
@@ -120,6 +127,16 @@ rsync -a --delete /tmp/sts/skills/spring-jpa-testing/ skills/spring-jpa-testing/
 git clone --depth 1 https://github.com/xntj-ai/codex-image /tmp/codex-image
 rsync -a --delete --exclude='.git/' --exclude='README.md' --exclude='.gitignore' \
   /tmp/codex-image/ skills/codex-image/
+```
+
+**上游按分层目录存放、这里拍平的 skill**（如 `aliyun-oss-ossutil`）——上游路径深、本地平铺，同步后需重新确认写死的路径：
+
+```bash
+git clone --depth 1 https://github.com/cinience/alicloud-skills /tmp/alicloud-skills
+rsync -a --delete /tmp/alicloud-skills/skills/storage/oss/aliyun-oss-ossutil/ skills/aliyun-oss-ossutil/
+cp /tmp/alicloud-skills/LICENSE skills/aliyun-oss-ossutil/LICENSE
+# rsync 会覆盖掉本地的拍平适配，需重新应用（见「来源表」备注）：
+grep -rn 'skills/storage/oss' skills/aliyun-oss-ossutil/
 ```
 
 **成套引入的同源 skill**（如 10 个 `flutter-*`）——浅克隆上游后，一次性覆盖全部同前缀目录：
