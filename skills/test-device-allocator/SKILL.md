@@ -118,7 +118,6 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 
 ## 与其他 skill 配合
 
-- **flutter-ui-automation**:先 acquire → `flutter run -d $DEVICE_ID`(debug)起 app → 再 `inspect` / `act`。多 app 并发时它的自动发现不可靠,launch 必须带 `-d`。
 - **flutter-add-integration-test**:其 Android `flutter drive` 示例不带 `-d`,并发场景必须补上 `-d $DEVICE_ID`。
 - **flutter-use-fvm**:flutter / dart 命令按其规则加 `fvm` 前缀。
 
@@ -141,7 +140,6 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 
 ## 相关 skill
 
-- flutter-ui-automation:拿到设备、app 跑起来之后的 UI 探查与自动化操作
 - flutter-add-integration-test:把验证过的流程沉淀为正式集成测试
 - flutter-use-fvm:fvm 项目的命令前缀规则
 - deveco-studio-emulator:启动 / 新建 / 管理鸿蒙模拟器(本 skill 只分配已连上的鸿蒙目标,不负责把它跑起来)
