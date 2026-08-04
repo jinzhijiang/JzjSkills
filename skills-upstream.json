@@ -20,7 +20,7 @@
       "id": "spring-testing-skills",
       "repo": "https://github.com/spring-ai-community/spring-testing-skills",
       "ref": "main",
-      "commit": null,
+      "commit": "7e7b33174e8b4cf7d756b73d76ec4ebd3f82568c",
       "sparse": [
         "skills"
       ],
