@@ -215,6 +215,31 @@ def cmd_check(selected: list[tuple[dict, list[dict]]]) -> int:
     return EXIT_OK
 
 
+def report_changes() -> None:
+    """汇报本次同步在工作区留下的变化。
+
+    只用 git diff --stat 会漏掉上游**新增**的文件——它们在本地是未跟踪状态,
+    diff 看不见。所以未跟踪文件要单独列出来,否则「上游加了 references/」这种
+    更新会被静默漏报。
+    """
+    paths = ["skills", "skills-upstream.json", "patches"]
+    diff = run(["git", "diff", "--stat", "--", *paths], cwd=REPO_ROOT, check=False)
+    untracked = run(["git", "ls-files", "--others", "--exclude-standard", "--", *paths],
+                    cwd=REPO_ROOT, check=False)
+
+    tracked_body = diff.stdout.strip()
+    new_files = [f for f in untracked.stdout.strip().split("\n") if f]
+
+    if tracked_body:
+        print(tracked_body)
+    if new_files:
+        print(f"\n上游新增 {len(new_files)} 个文件(未跟踪,需 git add):")
+        for path in new_files:
+            print(f"  + {path}")
+    if not tracked_body and not new_files:
+        print("(工作区没有变化——上游内容与本地一致)")
+
+
 def cmd_sync(manifest: dict, selected: list[tuple[dict, list[dict]]], do_deploy: bool) -> int:
     failed: list[str] = []
     synced: list[str] = []
@@ -265,10 +290,7 @@ def cmd_sync(manifest: dict, selected: list[tuple[dict, list[dict]]], do_deploy:
 
     log("")
     if synced:
-        diff = run(["git", "diff", "--stat", "--", "skills", "skills-upstream.json"],
-                   cwd=REPO_ROOT, check=False)
-        body = diff.stdout.strip()
-        print(body if body else "(工作区没有变化——上游内容与本地一致)")
+        report_changes()
     if failed:
         log(f"\n{len(failed)} 个 skill 同步失败: {', '.join(failed)}")
         return EXIT_FAILED

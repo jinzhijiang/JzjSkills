@@ -5,7 +5,7 @@
       "id": "awesome-copilot",
       "repo": "https://github.com/github/awesome-copilot",
       "ref": "main",
-      "commit": null,
+      "commit": "dab758a392cd6b06e806c1aa0444e2bc463b32f9",
       "sparse": [
         "skills/java-springboot"
       ],
@@ -55,7 +55,7 @@
       "id": "flutter-skills",
       "repo": "https://github.com/flutter/skills",
       "ref": "main",
-      "commit": null,
+      "commit": "135f7962017c74fa5758b076ba7b9eadbf6a1099",
       "sparse": [
         "skills"
       ],
