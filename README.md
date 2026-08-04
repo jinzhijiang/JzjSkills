@@ -35,6 +35,11 @@ JzjSkills/
 │   │   ├── assets/changelog.config.js   # 全局配置模板
 │   │   ├── references/                  # config、cli、troubleshooting
 │   │   └── scripts/check_commit_msg.py  # python3 标准库，提交前自检 / commit-msg 钩子
+│   ├── codex-image/                     # 外部引入：用 codex 订阅额度生图
+│   │   ├── SKILL.md
+│   │   ├── LICENSE                      # MIT，随上游一并保留
+│   │   ├── references/                  # prompt-recipes、boundaries
+│   │   └── scripts/codex_image.py       # python3 标准库，驱动 codex exec 出图
 │   └── …（spring-mvc-testing … 等 spring-* 结构同上；
 │           另有 13 个 flutter-* skill（10 个 Flutter 官方 + 3 个自建），
 │           其中 flutter-setup-firebase-crashlytics 含 references/ 与 agents/）
@@ -87,6 +92,7 @@ description: 简短描述这个 skill 做什么
 | `flutter-use-fvm` | 自建 / FVM 官方文档整理 | [FVM Documentation](https://fvm.app/documentation/getting-started/overview) | — | 2026-07-18 | 自建；强制 Flutter/Dart 命令通过 `fvm flutter` / `fvm dart` 执行，并按需覆盖完整配置、命令、IDE/CI 与故障排查 |
 | `flutter-google-play-release` | 自建 / Google Play 上架实操整理 | — | — | 2026-07-30 | 自建；Flutter Android 首发与更新的证据审计、商店资料、政策声明、IARC、AAB、质量建议和最终送审确认门 |
 | `git-cz` | 自建 / 基于 [streamich/git-cz](https://github.com/streamich/git-cz) 整理 | [streamich/git-cz](https://github.com/streamich/git-cz)（npm `git-cz@4.9.0`，Unlicense） | — | 2026-08-04 | 自建；统一所有项目的提交信息风格：消息契约、`assets/changelog.config.js` 全局模板、`scripts/check_commit_msg.py`（python3 标准库，无 node 也能校验，可装成 commit-msg 钩子） |
+| `codex-image` | [xntj-ai/codex-image](https://github.com/xntj-ai/codex-image) | [仓库根目录即 skill](https://github.com/xntj-ai/codex-image) | MIT | 2026-08-04 | 原样引入（上游 `9b4e0bc`）；仓库根目录本身就是 skill，取 `SKILL.md` + `references/`（2 个文件）+ `scripts/codex_image.py`，并保留 `LICENSE`；未引入上游 `README.md`、`.gitignore` |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-04 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`），并在 acquire 后自动亮屏解锁、release 时还原屏幕设置 |
 
 ## 更新已引入的 Skill
@@ -106,6 +112,14 @@ curl -sSL https://raw.githubusercontent.com/github/awesome-copilot/main/skills/j
 # 浅克隆上游到临时目录，再整目录同步（--delete 会移除上游已删除的文件）
 git clone --depth 1 https://github.com/spring-ai-community/spring-testing-skills /tmp/sts
 rsync -a --delete /tmp/sts/skills/spring-jpa-testing/ skills/spring-jpa-testing/
+```
+
+**仓库根目录即 skill**（如 `codex-image`）——上游整个仓库就是一个 skill，同步时排除仓库级文件：
+
+```bash
+git clone --depth 1 https://github.com/xntj-ai/codex-image /tmp/codex-image
+rsync -a --delete --exclude='.git/' --exclude='README.md' --exclude='.gitignore' \
+  /tmp/codex-image/ skills/codex-image/
 ```
 
 **成套引入的同源 skill**（如 10 个 `flutter-*`）——浅克隆上游后，一次性覆盖全部同前缀目录：
