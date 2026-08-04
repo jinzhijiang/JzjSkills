@@ -75,4 +75,9 @@ module.exports = {
   breakingChangePrefix: '🧨 ',
   closedIssueMessage: 'Closes: ',
   closedIssuePrefix: '✅ ',
+
+  // ↓ git-cz 本身不认识这个键(它只是被原样带着走,不影响任何行为),
+  //   由本 skill 的 check_commit_msg.py 读取:要求主题与正文用中文书写。
+  //   type / scope / 技术名词 / 标识符 / 路径不受影响。
+  requireChineseSubject: true,
 };

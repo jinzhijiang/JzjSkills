@@ -56,6 +56,10 @@ BREAKING CHANGE: 🧨 移除了 loginWithCode 旧接口
 
 ## 硬约束
 
+- **主题、正文、BREAKING CHANGE 描述一律用中文写**,哪怕仓库代码和注释是英文的。
+  技术名词、标识符、路径、命令、包名保持原文不翻译:
+  「新增 flutter_bloc 状态管理」对,「Add flutter_bloc state management」错,
+  「新增颤动集团状态管理」更错。`type` 和 `scope` 是固定英文,不受此约束。
 - 标题一行写完,`: ` 后跟主题,主题**不加结尾标点**(句号、感叹号、问号都不行)。
 - 主题祈使句:「新增登录页」「修复超时崩溃」,不是「新增了…」「修复过…」。
 - 主题长度 3 ~ 61 个字符(`maxMessageLength: 64` 减去 emoji 与空格占的 3)。

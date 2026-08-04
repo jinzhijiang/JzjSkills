@@ -49,7 +49,12 @@ DEFAULT_CONFIG = {
     "breakingChangePrefix": "🧨 ",
     "closedIssueMessage": "Closes: ",
     "closedIssuePrefix": "✅ ",
+    # git-cz 不认识的自定义键,只有本脚本读:要求主题与正文用中文书写。
+    # 没有配置文件的仓库默认不强制,由模板配置显式打开。
+    "requireChineseSubject": False,
 }
+
+CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿\U00020000-\U0002ffff]")
 
 # git-cz lib/getConfig.js 的查找顺序,自 git 根目录起逐级向上。
 CONFIG_FILES = (".git-cz.json", "changelog.config.js", "changelog.config.cjs", "changelog.config.json")
@@ -491,6 +496,8 @@ def _validate_header(header: str, config: dict, report: Report) -> None:
         report.error("主题结尾不要加标点(git-cz 会自动去掉英文句点)")
     if re.match(r"^[a-z]+(\([^()]*\))?\s*[:：]", stripped):
         report.error("主题里重复写了 type 前缀")
+    if config.get("requireChineseSubject") and stripped and not CJK_RE.search(stripped):
+        report.error("主题要用中文写(技术名词、标识符、路径可保留原文)")
 
     width = display_width(header)
     if width > MAX_LINE_WIDTH:
@@ -525,6 +532,18 @@ def _validate_layout(lines: list[str], config: dict, report: Report) -> None:
             expected = ("" if disable_emoji else closed_prefix) + closed_message
             if not line.startswith(expected):
                 report.warn(f"第 {index} 行关闭 issue 建议写成 `{expected}#123`")
+
+    if config.get("requireChineseSubject"):
+        body: list[str] = []
+        for line in lines[2:]:
+            if line.startswith("BREAKING") or line.startswith((closed_prefix, closed_message)):
+                break
+            body.append(line)
+        text = "\n".join(body).strip()
+        # 纯代码块 / 路径 / trailer 之类没有散文,不该被判成"没写中文"
+        prose = re.sub(r"`[^`]*`|^\s{4,}.*$|^[A-Za-z-]+: .*$", "", text, flags=re.MULTILINE)
+        if re.search(r"[A-Za-z]{3,}", prose) and not CJK_RE.search(prose):
+            report.warn("正文看着是英文,按约定用中文写(技术名词可保留原文)")
 
 
 # --------------------------------------------------------------------------- 输出

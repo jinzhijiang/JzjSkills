@@ -46,6 +46,19 @@
 
 `defaultType` / `defaultScope` / `defaultSubject` 之类的键**不存在**,别抄。
 
+### 额外的自定义键
+
+git-cz 对认不出的键是**原样带着走**(`{...defaults, ...overrides}` 之后没人读它),
+所以可以借配置文件放本 skill 自己的开关,不会影响 git-cz 任何行为:
+
+| 键 | 默认 | 谁读 | 作用 |
+|---|---|---|---|
+| `requireChineseSubject` | `false` | 只有 `check_commit_msg.py` | true 时主题必须含中文(否则报错),正文疑似全英文时告警 |
+
+判定方式是「主题里至少有一个 CJK 字符」,不是「不许出现英文」——
+`新增 flutter_bloc 状态管理`、`修复 iOS 14 下的崩溃` 都正常通过。
+模板里已置为 `true`;没有配置文件的仓库默认 `false`,不会平白拦下英文提交。
+
 ## 标题拼装算法
 
 `formatCommitMessage` 的实际逻辑,手写提交信息时照这个来:
@@ -99,6 +112,7 @@ maxLength: config.maxMessageLength - 3,
 | `scopes` 保持 `[]` 并加注释 | git-cz 的 scope 只能选不能输入,`scopes: []` 时这一问被**整个跳过**。全局模板列不出对所有项目都成立的 scope,交给项目级配置 |
 | `questions` 保留 `'scope'` | 与 `scopes: []` 并不冲突——空列表时自动跳过,项目级配置补上 `scopes` 就自动生效,不用再改 `questions` |
 | 保留 `questions` 中已去掉的 `'lerna'` | 默认值里有 `lerna`,非 lerna monorepo 用不到,去掉是对的 |
+| 新增 `requireChineseSubject: true` | 提交信息要中文写。git-cz 没有这个能力,由 `check_commit_msg.py` 补上 |
 | 大量注释 | 上面这些坑都写在旁边,免得下次重新踩 |
 
 `disableEmoji: false`、`format: '{emoji}{type}{scope}: {subject}'`、
