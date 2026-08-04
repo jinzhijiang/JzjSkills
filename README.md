@@ -46,7 +46,10 @@ JzjSkills/
 │   │   ├── agents/openai.yaml
 │   │   ├── references/                  # install.md、sources.md
 │   │   └── scripts/check_ossutil.py     # python3 标准库，校验前置条件并留存证据
+│   ├── patrol-setup/                    # 外部引入：Patrol E2E 三件套，均为单文件 skill
+│   │   └── SKILL.md
 │   └── …（spring-mvc-testing … 等 spring-* 结构同上；
+│           patrol-write-test、patrol-test-architecture 与 patrol-setup 同为单文件；
 │           另有 13 个 flutter-* skill（10 个 Flutter 官方 + 3 个自建），
 │           其中 flutter-setup-firebase-crashlytics 含 references/ 与 agents/）
 └── README.md
@@ -99,6 +102,9 @@ description: 简短描述这个 skill 做什么
 | `flutter-google-play-release` | 自建 / Google Play 上架实操整理 | — | — | 2026-07-30 | 自建；Flutter Android 首发与更新的证据审计、商店资料、政策声明、IARC、AAB、质量建议和最终送审确认门 |
 | `git-cz` | 自建 / 基于 [streamich/git-cz](https://github.com/streamich/git-cz) 整理 | [streamich/git-cz](https://github.com/streamich/git-cz)（npm `git-cz@4.9.0`，Unlicense） | — | 2026-08-04 | 自建；统一所有项目的提交信息风格：消息契约、`assets/changelog.config.js` 全局模板、`scripts/check_commit_msg.py`（python3 标准库，无 node 也能校验，可装成 commit-msg 钩子） |
 | `codex-image` | [xntj-ai/codex-image](https://github.com/xntj-ai/codex-image) | [仓库根目录即 skill](https://github.com/xntj-ai/codex-image) | MIT | 2026-08-04 | 原样引入（上游 `9b4e0bc`）；仓库根目录本身就是 skill，取 `SKILL.md` + `references/`（2 个文件）+ `scripts/codex_image.py`，并保留 `LICENSE`；未引入上游 `README.md`、`.gitignore` |
+| `patrol-setup` | [leancodepl/patrol](https://github.com/leancodepl/patrol)（Patrol 官方） | [skills/patrol-setup/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-setup) | Apache-2.0 | 2026-08-04 | 原样引入（上游 `cf2a783`，主分支为 `master`），仅含 `SKILL.md`；Flutter 项目首次接入 Patrol（仅覆盖 Android） |
+| `patrol-write-test` | 同上 | [skills/patrol-write-test/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-write-test) | Apache-2.0 | 2026-08-04 | 原样引入，仅含 `SKILL.md`；此前已在 `~/.cc-switch/skills` 中（2026-07-17 装入），内容与上游一致，本次纳入仓库管理 |
+| `patrol-test-architecture` | 同上 | [skills/patrol-test-architecture/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-test-architecture) | Apache-2.0 | 2026-08-04 | 原样引入，仅含 `SKILL.md`；同上，此前已装入本机，本次纳入仓库管理 |
 | `aliyun-oss-ossutil` | [cinience/alicloud-skills](https://github.com/cinience/alicloud-skills) | [skills/storage/oss/aliyun-oss-ossutil/](https://github.com/cinience/alicloud-skills/tree/main/skills/storage/oss/aliyun-oss-ossutil) | MIT | 2026-08-04 | 引入上游 `b22dc0a`；上游按 `storage/oss/` 分层存放，这里拍平为 `skills/aliyun-oss-ossutil/`，因此改了两处写死的旧路径（`SKILL.md` 的校验命令、`scripts/check_ossutil.py` 改为按 `__file__` 自定位），其余原样；`LICENSE` 取自上游仓库根目录 |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-04 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`），并在 acquire 后自动亮屏解锁、release 时还原屏幕设置 |
 
@@ -127,6 +133,14 @@ rsync -a --delete /tmp/sts/skills/spring-jpa-testing/ skills/spring-jpa-testing/
 git clone --depth 1 https://github.com/xntj-ai/codex-image /tmp/codex-image
 rsync -a --delete --exclude='.git/' --exclude='README.md' --exclude='.gitignore' \
   /tmp/codex-image/ skills/codex-image/
+```
+
+**skill 只是大仓库一个角落**（如 3 个 `patrol-*`）——上游是产品主仓、体积大，用 sparse checkout 只取 `skills/`（注意主分支是 `master`）：
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/leancodepl/patrol /tmp/patrol
+git -C /tmp/patrol sparse-checkout set skills
+cp -R /tmp/patrol/skills/patrol-* skills/
 ```
 
 **上游按分层目录存放、这里拍平的 skill**（如 `aliyun-oss-ossutil`）——上游路径深、本地平铺，同步后需重新确认写死的路径：
