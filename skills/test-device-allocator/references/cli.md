@@ -18,10 +18,12 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `android-avd:<AVD名>` | Android 模拟器——运行与否都按 AVD 名锁,避免重启后端口(emulator-5554 → 5556)漂移;同名 AVD 系统本身禁止双开 |
 | `ios-sim:<udid>` | iOS 模拟器 |
 | `ios-device:<udid>` | iOS 真机(devicectl 可见且 connected/wired) |
+| `harmony-device:<connectkey>` | 鸿蒙真机(`hdc list targets -v` 里 Connected 的非回环目标) |
+| `harmony-emu:<connectkey>` | 鸿蒙模拟器(回环地址目标,如 `127.0.0.1:5555`) |
 
 ## meta.json 字段
 
-`allocator_version`、`device_key`、`platform`(android|ios)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)。
+`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(为防熄屏改过的设备设置原值,release 时还原;没改过为 null)。
 
 ## 陈旧(stale)判定
 
@@ -35,7 +37,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--platform {android,ios,any}` | android | 平台过滤;Flutter 项目未指明平台、也没开发平台特有功能时用默认 android;两端皆可才传 any;`ios` 仅 macOS |
+| `--platform {android,ios,harmony,any}` 或逗号组合 | android | 平台过滤;Flutter 项目未指明平台、也没开发平台特有功能时用默认 android;两端皆可才传 any(= android+ios,**不含 harmony**);`ios` 仅 macOS;鸿蒙必须显式点名,组合如 `android,harmony`(同 tier 内按所列顺序优先)。工具链缺失时:只点了这一个平台 → exit 6,组合里 → 跳过并告警 |
 | `--device <id>` | — | 指定设备(serial / UDID / AVD 名),只尝试它;被占 → exit 7 |
 | `--no-physical` | 关 | 排除真机(不想占用插着的手机时用) |
 | `--no-create` | 关 | 只复用现有设备,无空闲直接 exit 3 |
@@ -47,13 +49,24 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `--max-emulators <N>` | 按内存自动 | 并发模拟器总数上限(Android 运行中 emulator + iOS Booted 合计;环境变量 `AI_DEVICE_MAX_EMULATORS` 亦可覆盖,显式值不受 1..4 夹取限制) |
 | `--memory <MB>` | 用 AVD 自带 `hw.ramSize` | Android 模拟器 guest RAM,512-8192,越界 exit 2;同时收窄内存闸门的每台开销估算(环境变量 `AI_DEVICE_EMULATOR_MEMORY` 亦可设定,`--memory` 优先) |
 | `--mem-override` | 关 | 跳过内存闸门(等效环境变量 `AI_DEVICE_MEM_OVERRIDE=1`) |
+| `--no-wake` | 关 | 不做亮屏解锁(默认会唤醒并尝试解锁分配到的设备) |
+| `--no-keep-awake` | 关 | 亮屏解锁但不修改屏幕超时 / 常亮设置 |
 
-分配优先级(tier 间严格有序,tier 内确定性排序):
+分配优先级(tier 间严格有序,tier 内先按 `--platform` 所列平台顺序、再按各平台的确定性排序):
 
-1. **空闲真机**:Android(`adb devices` state=device,按 adb 输出序)→ iOS(devicectl connected)
-2. **已在运行的空闲模拟器**:Android 运行中 emulator(按 AVD 名序)→ iOS Booted(`ai-test-*` 优先 → runtime 新 → iPhone 优先)
-3. **已停止的模拟器(启动它)**:Android `emulator -list-avds`(`ai-test-*` 优先 → 字母序)→ iOS Shutdown(同 2 排序)
-4. **新建**:命名 `ai-test-<时间戳>-<pid>`;`--platform any` 时先 iOS(创建+启动 ~30s,比 Android 冷启动轻)再 Android。Android 从已装 system-images 挑最高 API、`google_apis` 系 tag 优先、匹配宿主 abi(Apple Silicon → arm64-v8a);iOS 挑最新 runtime + 编号最大的 iPhone 机型
+1. **空闲真机**:Android(`adb devices` state=device,按 adb 输出序)→ iOS(devicectl connected)→ HarmonyOS(`hdc list targets -v` Connected 的非回环目标)
+2. **已在运行的空闲模拟器**:Android 运行中 emulator(按 AVD 名序)→ iOS Booted(`ai-test-*` 优先 → runtime 新 → iPhone 优先)→ HarmonyOS 回环目标(已启动的鸿蒙模拟器)
+3. **已停止的模拟器(启动它)**:Android `emulator -list-avds`(`ai-test-*` 优先 → 字母序)→ iOS Shutdown(同 2 排序)。**鸿蒙没有这一 tier**
+4. **新建**:命名 `ai-test-<时间戳>-<pid>`;`--platform any` 时先 iOS(创建+启动 ~30s,比 Android 冷启动轻)再 Android。Android 从已装 system-images 挑最高 API、`google_apis` 系 tag 优先、匹配宿主 abi(Apple Silicon → arm64-v8a);iOS 挑最新 runtime + 编号最大的 iPhone 机型。**鸿蒙不新建**——只点了 harmony 且无空闲目标时直接 exit 3,hint 指向 deveco-studio-emulator
+
+### HarmonyOS 设备
+
+- `hdc` 路径探测顺序:`HDC_PATH` → `DEVECO_SDK_HOME` / `HOS_SDK_HOME` / `OHOS_SDK_HOME`(`<v>/default/openharmony/toolchains/hdc` 等) → `DEVECO_STUDIO_PATH` → `PATH` → DevEco Studio 常见安装位置(macOS `/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc`)→ 独立 SDK / command-line-tools(版本目录取最新)。进程内只探测一次。
+- 枚举用 `hdc list targets -v`,只有状态含 `Connected` 的目标参与分配,其余进 `warnings`;`127.0.0.1:*` / `localhost:*` 视为模拟器,其余视为真机。
+- 首次调用 hdc 会拉起 hdc 服务(与 adb 同理),因此只在 `--platform` 里点了 harmony 时才查(`status` 除外——它本就要全景枚举)。
+- 鸿蒙候选恒 `needs_boot=false`,**不经过内存闸门**;但已在跑的鸿蒙模拟器会计入闸门的「运行中模拟器数」(它也是 QEMU 虚拟机,同样抢宿主内存)。
+- 幂等重取时会核对设备仍在 hdc 目标列表里;断连则放弃该锁并重新分配(不会尝试启动它)。
+- 结果 JSON 的 `usage` 里给 `hdc -t <id> <command>`,并附注:鸿蒙需 OpenHarmony 版 Flutter SDK(`flutter build hap`)且项目要有 `ohos` 模块。
 
 ### 内存闸门(tier 3 / 4 前置检查)
 
@@ -95,19 +108,53 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
     "flutter_run": "flutter run -d emulator-5554",
     "flutter_drive": "flutter drive --driver=test_driver/integration_test.dart --target=integration_test/app_test.dart -d emulator-5554",
     "adb": "adb -s emulator-5554 <command>"
+  },
+  "screen": {
+    "platform": "android", "attempted": true,
+    "state_before": "asleep", "state": "awake", "locked": false,
+    "actions": ["input keyevent KEYCODE_WAKEUP", "wm dismiss-keyguard", "svc power stayon true"],
+    "notes": [], "restore": {"type": "android_stayon", "prev": "0"}
   }
 }
 ```
 
-字段说明:`created`(本次新建的模拟器)、`booted`(本次由脚本启动)、`reused`(幂等复用已持有的锁)、`memory_mb`(本次施加的 guest RAM;真机 / iOS / 复用已在运行的模拟器为 null)、`release_cmd`(可直接执行的释放命令)。
+字段说明:`created`(本次新建的模拟器)、`booted`(本次由脚本启动)、`reused`(幂等复用已持有的锁)、`memory_mb`(本次施加的 guest RAM;真机 / iOS / 复用已在运行的模拟器为 null)、`release_cmd`(可直接执行的释放命令)、`screen`(亮屏解锁结果,见下)。
 
 失败 JSON 统一:`{"ok": false, "action": "acquire", "error": "<错误码名>", "message": "…", "hint": "…"}`。
+
+### 亮屏解锁(acquire 收尾自动执行)
+
+熄屏 / 锁屏的设备上自动化点不动(截图全黑、tap 落空)。acquire 在设备就绪后统一走一遍唤醒 → 解锁 → 拉长屏幕超时,结果放进 `screen`:
+
+| 平台 | 唤醒 | 状态判定 | 解锁 | 防熄屏(记 `restore`) |
+|---|---|---|---|---|
+| Android | `input keyevent KEYCODE_WAKEUP`(只唤醒,不会像 KEYCODE_POWER 那样按灭) | `dumpsys power` 的 `mWakefulness=`;`dumpsys window` 的 `isKeyguardShowing` / `mDreamingLockscreen` / `mShowingLockscreen`(设备侧 grep,不回传整份 dump) | `wm dismiss-keyguard` | 先读 `settings get global stay_on_while_plugged_in` 存原值,再 `svc power stayon true` |
+| HarmonyOS | `power-shell wakeup` | `hidumper -s PowerManagerService -a -s` 的 `Current State:`;锁屏看 `hidumper -s WindowManagerService -a -a` 可见段里有没有 `SCBScreenLock*` | 可见段仍有锁屏窗口 → `uinput -T -m` 上滑(坐标按 dump 里最大窗口 rect 推算,读不到用 1080×2340 兜底) | `power-shell timeout -o 1800000`,原 `OverrideTimeout` 存进 restore |
+| iOS 模拟器 | — | — | — | 不适用(`attempted:false`,`reason: ios_simulator_no_lockscreen`) |
+| iOS 真机 | — | — | 系统不允许 | 不适用(`reason: ios_physical_manual_unlock`,notes 提示手动解锁 + 自动锁定设「永不」) |
+
+- `screen.locked`:`true`=仍锁着(多半有 PIN/图案/密码,系统禁止程序解锁,notes 会写明)、`false`=已解锁、`null`=判不出。
+- **全程 fail-soft**:每一步失败只写 stderr,`safe_wake` 兜住所有异常,acquire 不会因亮屏失败而失败。
+- `restore` 会写进锁的 meta(`screen_restore`),且**只记第一次**——否则重复 `wake` 会把「原值」覆盖成我们自己设的常亮值,release 就还原不回去了。
+- `--no-wake` 完全不碰设备;`--no-keep-awake` 只亮屏解锁、不改任何设置(此时无 `restore`)。
+
+## wake
+
+`python3 device_lock.py wake [--key <k> | --device <id> | --all-mine] [--owner <pid>] [--project <path>] [--no-keep-awake]`
+
+测试中途设备又熄屏时重新点亮,不必重新 acquire。目标选择:
+
+- 不带选择参数 → 本会话(owner+project)持有的那台;
+- `--key` → 指定锁;`--all-mine` → 该 owner 持有的全部;
+- `--device <id>` → 先在锁记录里找,找不到就从当前连着的设备反查平台(adb → hdc → iOS 模拟器),都没有则 exit 3。
+
+输出:`{"ok": true, "action": "wake", "results": [{"device_key", "platform", "device_id", "name", "screen": {…}}]}`。`screen` 结构同 acquire。
 
 ## release
 
 `--key <device_key>` / `--device <id或名>` / `--all-mine [--owner <pid>]` 三选一。幂等,恒 exit 0。
 输出:`{"ok": true, "action": "release", "released": [...], "not_found": [...]}`。
-**只还锁,不关模拟器**(留给下个会话热复用)。
+**只还锁,不关模拟器**(留给下个会话热复用);但会按 meta 里的 `screen_restore` 把防熄屏改过的设备设置还原回去(短超时、尽力而为,设备已拔线就跳过)。回收陈旧锁(acquire 起手的清扫、`clean`)时同样会还原——会话崩了也不会把人家手机永久留在常亮。
 
 ## status
 
@@ -118,7 +165,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
  "memory": {"total_gb": 16.0, "available_gb": 5.2, "running_vms": 1, "max_vms": 2,
             "per_vm_gb": 4.0, "reserve_gb": 8.0, "vm_overhead_gb": 1.5,
             "can_start_new_vm": true},
- "devices": [{"key": "…", "platform": "…", "kind": "…", "device_id": "…", "name": "…",
+ "devices": [{"key": "…", "platform": "android|ios|harmony", "kind": "…",
+              "device_id": "…", "name": "…",
               "state": "running|booted|stopped|shutdown|connected",
               "ram_mb": 2048,
               "lock": null | {"state": "HELD|STALE", "reason": "dead_pid|ttl_expired|…",
@@ -128,7 +176,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
  "orphan_locks": [...], "warnings": [...]}
 ```
 
-`orphan_locks` 是锁着但设备已消失(如 AVD 被删)的锁;unauthorized / offline 设备在 `warnings` 里。
+装了 hdc 时,`status` 也会枚举鸿蒙目标(真机 `state: connected`,模拟器 `state: running` 并计入 `memory.running_vms`)。
+`orphan_locks` 是锁着但设备已消失(如 AVD 被删)的锁;unauthorized / offline / 未 Connected 的设备在 `warnings` 里。
 `ram_mb` 是 AVD `config.ini` 里配置的 guest RAM(Android 模拟器专有,其余设备为 null),用来看哪台吃得多;`memory.per_vm_gb` / `vm_overhead_gb` 是闸门的默认估算基数(status 不接受 `--memory`,恒按默认 4.0GB 展示)。
 
 ## clean
@@ -141,18 +190,18 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | 码 | 名 | 含义 |
 |---|---|---|
 | 0 | OK | 成功 |
-| 2 | — / ARGS | 参数错误(argparse);或 `--memory` / `AI_DEVICE_EMULATOR_MEMORY` 非法(非整数、不在 512-8192) |
-| 3 | NO_DEVICE | 无可用候选且不允许/无法新建;或 `--device` 目标不存在 |
+| 2 | — / ARGS | 参数错误(argparse);`--platform` 取值不认识;或 `--memory` / `AI_DEVICE_EMULATOR_MEMORY` 非法(非整数、不在 512-8192) |
+| 3 | NO_DEVICE | 无可用候选且不允许/无法新建(含「只点了 harmony 但没有空闲鸿蒙目标」);或 `--device` / `wake` 的目标不存在 |
 | 4 | NO_SYSTEM_IMAGE | Android 新建被缺镜像挡住(hint 给 sdkmanager 命令,不自动下载) |
 | 5 | BOOT_TIMEOUT | 模拟器启动/就绪超时(锁已回滚,本次拉起的模拟器进程也会被关闭) |
-| 6 | ENV_MISSING | 所选平台工具链缺失(无 Android SDK / 无 xcrun) |
+| 6 | ENV_MISSING | 所选平台工具链缺失(无 Android SDK / 无 xcrun / 找不到 hdc);仅当该平台是唯一所选时才报错,组合里则跳过并告警 |
 | 7 | BUSY | `--device` 指定的设备被存活锁占用 |
 | 8 | INTERNAL | 未预期异常(traceback 在 stderr) |
 | 9 | MEMORY_PRESSURE | 内存闸门拦截:配额已满或可用内存不足,不再启动/新建模拟器(真机不受影响;0 台模拟器在跑时不会触发——第一台恒放行) |
 
 ## 幂等与并发语义
 
-- 同 `owner`+`project` 重复 acquire → 返回已持有设备,`reused: true`,并刷新 `acquired_at`(续 TTL);若该设备已被手动关掉,会自动重新启动它(RAM 沿用锁里的 `memory_mb`)。
+- 同 `owner`+`project` 重复 acquire → 返回已持有设备,`reused: true`,并刷新 `acquired_at`(续 TTL);若该设备已被手动关掉,会自动重新启动它(RAM 沿用锁里的 `memory_mb`)。鸿蒙设备不会被重启——断连即放弃该锁另行分配。幂等重取同样会再做一次亮屏解锁。
 - 多会话同刻抢同一候选:`mkdir` 只有一个成功,失败方自动尝试下一候选;双方同时判定某锁陈旧时,rename 先到者才有权删除。
 - 候选启动失败会先回滚锁、关掉本次拉起的模拟器进程,再换下一台;不会遗留"锁着/跑着一台起不来的设备"。
 - 锁着的模拟器被人手动关机:锁仍视为持有(owner 可能重启它),不会被误回收;在 status 里表现为 `state: stopped` 且 `lock` 非空。

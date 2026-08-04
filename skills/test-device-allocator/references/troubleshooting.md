@@ -19,6 +19,50 @@ yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
 - 没有可用 runtime:Xcode → Settings → Platforms 下载 iOS runtime。
 - iOS 真机需 wired/connected 且已配对(`xcrun devicectl list devices` 可见);把 Flutter app 跑上真机还需开发者模式与签名,由被测项目自行保证。
 
+## HarmonyOS 环境
+
+- 需要 `hdc`。探测顺序:`HDC_PATH` → `DEVECO_SDK_HOME` / `HOS_SDK_HOME` / `OHOS_SDK_HOME` → `DEVECO_STUDIO_PATH` → `PATH` → DevEco Studio 常见安装目录 → 独立 SDK / command-line-tools(版本目录取最新)。典型位置:
+
+```bash
+# macOS
+/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc
+# Windows
+"{DevEco Studio安装目录}\sdk\default\openharmony\toolchains\hdc.exe"
+# 探测不到时手动指定
+export HDC_PATH=/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc
+```
+
+- 只有 `hdc list targets -v` 里状态含 `Connected` 的目标才参与分配;其余进 `warnings`。真机看不到就检查 USB 调试授权、换线、`hdc kill -r` 重启服务。
+- 本 skill **不启动、不新建**鸿蒙模拟器。要用模拟器先用 deveco-studio-emulator 把它跑起来,跑起来后它会以 `127.0.0.1:<port>` 出现在 hdc 目标列表里,再 acquire 就能领到(tier2)。
+- 鸿蒙必须显式点名:`--platform harmony` 或 `--platform android,harmony`。`--platform any` **不含**鸿蒙——标准 Flutter SDK 编不出 hap,把鸿蒙设备分给普通项目只会白白浪费一轮。
+- 把 Flutter app 跑上鸿蒙设备需要 OpenHarmony 版 Flutter SDK 和项目里的 `ohos/` 模块,由被测项目自行保证;本 skill 只负责把设备分给你。
+
+## 设备熄屏 / 锁屏
+
+**症状**:截图全黑或停在锁屏、`tap` 点了没反应、flutter_driver 找不到 widget、明明 app 起来了却"看不见"。
+
+**处置**:
+
+1. acquire 默认已经做了唤醒 + 解锁 + 拉长屏幕超时,先看返回 JSON 的 `screen` 字段确认做没做成:`state` 应为 `awake`、`locked` 应为 `false`。
+2. 测试中途又睡过去 → `python3 <skill根>/scripts/device_lock.py wake --key <device_key>` 再点一次,不用重新 acquire。
+3. `screen.locked` 是 `true` → 设备设了 PIN / 图案 / 密码,系统不允许程序解锁,需要人工解一次(之后 `stayon` / 屏幕超时覆盖会让它别再锁上)。
+4. `screen.attempted` 是 `false`:`reason` 会说明原因——`disabled_by_--no-wake`(自己关掉的)、`ios_simulator_no_lockscreen`(不需要)、`ios_physical_manual_unlock`(iOS 真机只能手动解锁,并把「设置 → 显示与亮度 → 自动锁定」设为「永不」)、`adb_missing` / `hdc_missing`(工具链没找到)。
+5. 手动等价命令:
+
+```bash
+# Android
+adb -s <id> shell input keyevent KEYCODE_WAKEUP
+adb -s <id> shell wm dismiss-keyguard
+adb -s <id> shell svc power stayon true          # 还原:settings put global stay_on_while_plugged_in 0
+
+# HarmonyOS
+hdc -t <id> shell power-shell wakeup
+hdc -t <id> shell uinput -T -m 540 1870 540 580 300    # 上滑解锁,坐标按分辨率折算
+hdc -t <id> shell power-shell timeout -o 1800000       # 还原:power-shell timeout -r
+```
+
+6. 改过的设置记在锁的 meta(`screen_restore`)里,`release` / 回收陈旧锁 / `clean` 时自动还原;完全不想动设备就 acquire 传 `--no-wake`。
+
 ## 手动清理
 
 本 skill 的 release **不关模拟器**(留给下个会话热复用)。需要彻底清理时:
@@ -47,7 +91,7 @@ python3 <skill根>/scripts/device_lock.py clean --all
 | 3 NO_DEVICE | 无空闲设备且 `--no-create`;或 `--device` 目标不存在 | 等他人 release / `status` 查占用 / 核对设备 id |
 | 4 NO_SYSTEM_IMAGE | 新建 AVD 缺镜像 | 按 JSON `hint` 里的 sdkmanager 命令安装后重试 |
 | 5 BOOT_TIMEOUT | 模拟器启动/就绪超时(锁已回滚) | 加大 `--timeout`;查内存/虚拟化;手动启动一次看具体报错 |
-| 6 ENV_MISSING | 平台工具链缺失 | 装 Android SDK / Xcode;Linux 宿主不支持 iOS |
+| 6 ENV_MISSING | 平台工具链缺失 | 装 Android SDK / Xcode / DevEco Studio(hdc,或设 `HDC_PATH`);Linux 宿主不支持 iOS;组合平台里缺一个只跳过并告警,不报错 |
 | 7 BUSY | `--device` 指定的设备被占 | 去掉 `--device` 另挑;或 `status` 看占用者是谁 |
 | 8 INTERNAL | 未预期异常 | 看 stderr 的 traceback 排查 |
 | 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满或可用内存不足每台开销 + 2GB;0 台模拟器在跑时不触发,第一台恒放行) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)后重试;Android 可 `--memory 1024` 压小单台换配额;确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
@@ -75,6 +119,8 @@ python3 <skill根>/scripts/device_lock.py clean --all
 - 锁着的模拟器被人手动关掉:锁不会被误回收;持有者下次幂等 acquire 会自动把它重新启动(此重启不过内存闸门——净占用不增)。
 - offline / 卡死的模拟器串号计入内存配额(qemu 进程还活着就仍占内存);想释放配额先把它冷关掉。
 - 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。
+- 鸿蒙候选永远不需要启动,**不过内存闸门**;但已在跑的鸿蒙模拟器会计入闸门的运行中模拟器数(它也是 QEMU 虚拟机)。只有 `--platform` 里点了 harmony 时才去查(否则会为纯 Android 的 acquire 平白拉起 hdc 服务);`status` 只要装了 hdc 就会枚举。
+- 亮屏解锁全程 fail-soft:任何一步失败都只写 stderr,acquire / wake 不会因此失败。
 - `--memory` 只在**需要启动**模拟器时才有意义:领到真机、或复用已经跑着的模拟器时无效(跑起来的 VM 改不了 RAM),此时结果 JSON 的 `memory_mb` 为 null。
 - `--memory` 只对本工具新建的 AVD 写 `config.ini`;启动用户自己的 AVD(如 Pixel_10)只覆盖本次运行,不改他们的配置。手动持久修改:改 `~/.android/avd/<名>.avd/config.ini` 的 `hw.ramSize`(纯数字按 MB 解释)。
 - 改了 RAM 的那次启动一定是冷启动(quickboot 快照要求 RAM 一致),acquire 会慢 1-2 分钟;之后维持同一值就能继续吃快照。

@@ -3,8 +3,9 @@
 """device_lock.py — 多项目并发 AI 测试的设备分配与互斥锁。
 
 用法:
-  python3 device_lock.py acquire [--platform any|android|ios] [--device <id>] [...]
+  python3 device_lock.py acquire [--platform any|android|ios|harmony|逗号组合] [--device <id>] [...]
   python3 device_lock.py release --key <device_key> | --device <id> | --all-mine
+  python3 device_lock.py wake [--key <k> | --device <id> | --all-mine]
   python3 device_lock.py status
   python3 device_lock.py clean [--all]
 
@@ -14,6 +15,7 @@ stdout 只输出单行 JSON(机读);人读过程信息全部走 stderr。
 """
 
 import argparse
+import glob
 import json
 import os
 import platform as platform_mod
@@ -37,6 +39,15 @@ IOS_BOOT_TIMEOUT = 180
 RUNNING_EMU_READY_TIMEOUT = 60  # 已在运行的模拟器的就绪确认
 META_GRACE_SECONDS = 60        # meta.json 缺失/损坏时的并发写宽限
 TOMB_MAX_AGE = 600             # .reclaim-* 墓碑残骸清理阈(秒)
+HDC_TIMEOUT = 20               # hdc list targets 等外部命令超时
+
+# 亮屏解锁:设备熄屏/锁屏时自动化点不动屏幕,acquire 完成后统一做一次(--no-wake 关闭)。
+# 每一步都是尽力而为——失败只记日志,绝不让 acquire 失败。
+WAKE_CMD_TIMEOUT = 15
+RESTORE_TIMEOUT = 8            # release 时还原屏幕设置的短超时(设备可能已拔线)
+KEEP_AWAKE_MS = 1800000        # HarmonyOS 屏幕超时覆盖值(30 分钟)
+HARMONY_LOCK_WINDOW = "SCBScreenLock"   # hidumper WMS 里的锁屏窗口名前缀
+HARMONY_DEFAULT_SCREEN = (1080, 2340)   # 读不到分辨率时的上滑兜底坐标基准
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_DEVICE, EXIT_NO_SYSTEM_IMAGE = 0, 2, 3, 4
 EXIT_BOOT_TIMEOUT, EXIT_ENV_MISSING, EXIT_BUSY, EXIT_INTERNAL = 5, 6, 7, 8
@@ -173,6 +184,89 @@ def have_simctl():
     return sys.platform == "darwin" and shutil.which("xcrun") is not None
 
 
+# ---------- HarmonyOS(hdc)----------
+
+_HDC_CACHE = []  # [路径 or None];glob 探测有成本,进程内只做一次
+
+
+def _hdc_candidates():
+    exe = "hdc.exe" if sys.platform == "win32" else "hdc"
+    rel = os.path.join("openharmony", "toolchains", exe)
+    out = []
+    p = os.environ.get("HDC_PATH")
+    if p:
+        out.append(p)
+    for var in ("DEVECO_SDK_HOME", "HOS_SDK_HOME", "OHOS_SDK_HOME"):
+        v = os.environ.get(var)
+        if v:
+            out += [os.path.join(v, "default", rel), os.path.join(v, rel),
+                    os.path.join(v, "toolchains", exe)]
+    studio = os.environ.get("DEVECO_STUDIO_PATH")
+    if studio:
+        out.append(os.path.join(studio, "sdk", "default", rel))
+    w = shutil.which("hdc")
+    if w:
+        out.append(w)
+    home = os.path.expanduser("~")
+    studios = ["/Applications/DevEco-Studio.app/Contents",
+               os.path.join(home, "Applications", "DevEco-Studio.app", "Contents"),
+               "/opt/Huawei/DevEco Studio", os.path.join(home, "Huawei", "DevEco Studio"),
+               r"C:\Program Files\Huawei\DevEco Studio",
+               os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Huawei",
+                            "DevEco Studio")]
+    for s in studios:
+        if s:
+            out.append(os.path.join(s, "sdk", "default", rel))
+    # 独立 SDK / command-line-tools:版本目录用 glob 展开(取最新)
+    for pat in (os.path.join(home, "Library", "Huawei", "Sdk", "*", "toolchains", exe),
+                os.path.join(home, "Library", "OpenHarmony", "Sdk", "*", "toolchains", exe),
+                os.path.join(home, "OpenHarmony", "Sdk", "*", "toolchains", exe),
+                os.path.join(home, "command-line-tools", "sdk", "default", rel)):
+        out += sorted(glob.glob(pat), reverse=True)
+    return out
+
+
+def hdc_tool():
+    """解析 hdc 绝对路径(HarmonyOS 设备连接器);找不到返回 None。"""
+    if _HDC_CACHE:
+        return _HDC_CACHE[0]
+    found = None
+    for c in _hdc_candidates():
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            found = c
+            break
+    _HDC_CACHE.append(found)
+    return found
+
+
+def hdc_devices(warnings):
+    """健康的鸿蒙目标 [{serial, is_emulator}];非 Connected 的只进 warnings。
+
+    `hdc list targets -v` 每行形如 `<connectkey>\t\tUSB\tConnected\tlocalhost`;
+    无设备时输出 `[Empty]`。回环地址的目标(127.0.0.1:5555)是 DevEco 模拟器。
+    """
+    hdc = hdc_tool()
+    if not hdc:
+        return [], None
+    rc, out, err = run([hdc, "list", "targets", "-v"], timeout=HDC_TIMEOUT)
+    if rc != 0:
+        warnings.append(f"hdc list targets 失败: {(err or out or '').strip()[:120] or rc}")
+        return [], hdc
+    devs = []
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts or parts[0].startswith("[Empty]"):
+            continue
+        serial = parts[0]
+        if "Connected" not in parts[1:]:
+            warnings.append(f"跳过鸿蒙目标 {serial}(状态 {' '.join(parts[1:]) or '未知'},"
+                            f"未连接不参与分配)")
+            continue
+        devs.append({"serial": serial,
+                     "is_emulator": serial.startswith(("127.0.0.1:", "localhost:"))})
+    return devs, hdc
+
+
 # ---------- 内存感知 ----------
 
 def _win_memory_status():
@@ -291,10 +385,12 @@ def env_max_vms():
         return None
 
 
-def running_vm_count():
-    """当前在跑的模拟器总数(Android emulator 串号 + iOS Booted)。
+def running_vm_count(include_harmony=False):
+    """当前在跑的模拟器总数(Android emulator 串号 + iOS Booted [+ 鸿蒙模拟器])。
 
-    offline/卡死的 emulator 串号也计入——进程还活着就仍占着内存。
+    offline/卡死的 emulator 串号也计入——进程还活着就仍占着内存。鸿蒙模拟器同样是
+    QEMU 虚拟机、同样抢宿主内存,但只在本次确实要分配鸿蒙设备时才查(否则会为纯
+    Android 的 acquire 平白拉起 hdc 服务)。
     """
     n = 0
     adb = tool("adb")
@@ -303,10 +399,12 @@ def running_vm_count():
     if have_simctl():
         booted, _ = ios_sims()
         n += len(booted)
+    if include_harmony and hdc_tool():
+        n += sum(1 for d in hdc_devices([])[0] if d["is_emulator"])
     return n
 
 
-def mem_policy(max_override=None, ignore=False, memory_mb=None):
+def mem_policy(max_override=None, ignore=False, memory_mb=None, include_harmony=False):
     """评估内存闸门,返回 dict。enabled=False 表示不拦截(显式覆盖或探测失败)。
 
     memory_mb 为本次将施加的 guest RAM(仅 --platform android 传入):每台开销按它
@@ -331,7 +429,7 @@ def mem_policy(max_override=None, ignore=False, memory_mb=None):
     if max_vms is None and avail is None:
         info["enabled"] = False  # 全部探测失败,放行
         return info
-    running = running_vm_count()
+    running = running_vm_count(include_harmony)
     info["running_vms"] = running
     sized = f"(按每台 {vm_gb}GB" + (f" / guest RAM {memory_mb}MB)" if memory_mb else ")")
     if max_vms is not None and running >= max_vms:
@@ -463,10 +561,16 @@ def reclaim_path(path):
 
 
 def release_lock(key):
+    """还锁,并把 acquire 为「防熄屏」改过的设备设置还原回去(尽力而为)。"""
     d = lock_dir(key)
     if not os.path.isdir(d):
         return False
-    return reclaim_path(d)
+    meta = read_meta(d)
+    if not reclaim_path(d):
+        return False
+    if restore_screen(meta):
+        log(f"{key}: 已还原屏幕超时设置")
+    return True
 
 
 def list_locks():
@@ -530,6 +634,7 @@ def sweep_stale_locks():
         state, reason = eval_lock(path, meta)
         if state == "STALE" and reclaim_path(path):
             removed.append(f"{(meta or {}).get('device_key', dirname)}({reason})")
+            restore_screen(meta)   # 会话崩了也别把人家手机永久设成常亮
     if removed:
         log(f"回收陈旧锁: {', '.join(removed)}")
 
@@ -759,6 +864,234 @@ def ios_physicals(warnings):
     return out
 
 
+# ---------- 亮屏解锁 ----------
+#
+# 设备熄屏 / 停在锁屏时,自动化测试点不动屏幕(截图全黑、tap 落空、flutter_driver
+# 找不到 widget)。acquire 拿到设备后统一走一次:唤醒 → 解锁 → 顺手把屏幕超时拉长,
+# 免得测到一半又睡过去;拉长的设置记进锁的 meta,release 时还原回去。
+# 设了 PIN / 图案 / 密码的真机无法程序解锁(系统限制),此时只提示、不报错。
+
+
+def _android_dump(adb, serial, service, pattern):
+    """在设备侧 grep,避免把整份 dumpsys 拉回宿主。"""
+    rc, out, _ = run([adb, "-s", serial, "shell",
+                      f"dumpsys {service} | grep -E '{pattern}'"], timeout=WAKE_CMD_TIMEOUT)
+    return out if rc == 0 else ""
+
+
+def android_power_state(adb, serial):
+    """awake / asleep / dozing …;读不到返回 None。"""
+    m = re.search(r"mWakefulness=(\w+)", _android_dump(adb, serial, "power", "mWakefulness"))
+    return m.group(1).lower() if m else None
+
+
+def android_locked(adb, serial):
+    """True=锁屏中,False=已解锁,None=判不出。"""
+    out = _android_dump(adb, serial, "window",
+                        "isKeyguardShowing|mDreamingLockscreen|mShowingLockscreen")
+    for pat in ("isKeyguardShowing", "mDreamingLockscreen", "mShowingLockscreen"):
+        m = re.search(pat + r"=(true|false)", out)
+        if m:
+            return m.group(1) == "true"
+    return None
+
+
+def android_setting(adb, serial, ns, key):
+    rc, out, _ = run([adb, "-s", serial, "shell", "settings", "get", ns, key],
+                     timeout=WAKE_CMD_TIMEOUT)
+    v = (out or "").strip()
+    return v if rc == 0 and v.isdigit() else None
+
+
+def wake_android(adb, serial, keep_awake):
+    info = {"platform": "android", "attempted": True, "actions": [], "notes": []}
+    state = android_power_state(adb, serial)
+    info["state_before"] = state
+    if state != "awake":
+        # KEYCODE_WAKEUP 只唤醒,不像 KEYCODE_POWER 那样会把亮着的屏幕按灭
+        run([adb, "-s", serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
+            timeout=WAKE_CMD_TIMEOUT)
+        info["actions"].append("input keyevent KEYCODE_WAKEUP")
+        time.sleep(1)
+    locked = android_locked(adb, serial)
+    if locked is not False:
+        run([adb, "-s", serial, "shell", "wm", "dismiss-keyguard"], timeout=WAKE_CMD_TIMEOUT)
+        info["actions"].append("wm dismiss-keyguard")
+        time.sleep(1)
+        locked = android_locked(adb, serial)
+        if locked:
+            info["notes"].append("keyguard 仍在(多半设了 PIN/图案/密码,系统不允许程序解锁),"
+                                 "请手动解锁后重试")
+    info["locked"] = locked
+    if keep_awake:
+        prev = android_setting(adb, serial, "global", "stay_on_while_plugged_in")
+        rc, _, _ = run([adb, "-s", serial, "shell", "svc", "power", "stayon", "true"],
+                       timeout=WAKE_CMD_TIMEOUT)
+        if rc == 0:
+            info["actions"].append("svc power stayon true")
+            if prev is not None:
+                info["restore"] = {"type": "android_stayon", "prev": prev}
+    info["state"] = android_power_state(adb, serial)
+    return info
+
+
+def harmony_power(hdc, serial):
+    """(电源状态, 当前 OverrideTimeout 毫秒);读不到的项为 None。"""
+    rc, out, _ = run([hdc, "-t", serial, "shell", "hidumper", "-s",
+                      "PowerManagerService", "-a", "-s"], timeout=WAKE_CMD_TIMEOUT)
+    if rc != 0:
+        return None, None
+    m = re.search(r"Current State:\s*(\w+)", out or "")
+    o = re.search(r"OverrideTimeout=(\d+)ms", out or "")
+    return (m.group(1).lower() if m else None), (int(o.group(1)) if o else None)
+
+
+def harmony_windows(hdc, serial):
+    """(可见窗口名列表, (宽,高));读不到返回 (None, None)。
+
+    hidumper WMS 的 -a 输出中,表头之后到第一条纯虚线之间是按 ZOrder 排的可见窗口,
+    虚线之后(ZOrd=-1)是不可见窗口。锁屏窗口 SCBScreenLock* 出现在可见段 = 正锁着。
+    """
+    rc, out, _ = run([hdc, "-t", serial, "shell", "hidumper", "-s",
+                      "WindowManagerService", "-a", "-a"], timeout=WAKE_CMD_TIMEOUT)
+    if rc != 0 or "WindowName" not in (out or ""):
+        return None, None
+    visible, size, started = [], None, False
+    for line in out.splitlines():
+        if not started:
+            started = "WindowName" in line and "ZOrd" in line
+            continue
+        if line.strip() and set(line.strip()) == {"-"}:
+            break                                   # 可见段到此为止
+        m = re.match(r"^(\S+)\s", line)
+        if m:
+            visible.append(m.group(1))
+        r = re.search(r"\[\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s*\]", line)
+        if r:
+            wh = (int(r.group(1)), int(r.group(2)))
+            if size is None or wh[0] * wh[1] > size[0] * size[1]:
+                size = wh                           # 全屏窗口的尺寸即屏幕分辨率
+    return visible, size
+
+
+def harmony_locked(windows):
+    if windows is None:
+        return None
+    return any(w.startswith(HARMONY_LOCK_WINDOW) for w in windows)
+
+
+def wake_harmony(hdc, serial, keep_awake):
+    info = {"platform": "harmony", "attempted": True, "actions": [], "notes": []}
+    state, override_prev = harmony_power(hdc, serial)
+    info["state_before"] = state
+    if state is None:
+        info["notes"].append("读不到电源状态(hidumper PowerManagerService),仍尝试唤醒")
+    if state != "awake":
+        run([hdc, "-t", serial, "shell", "power-shell", "wakeup"], timeout=WAKE_CMD_TIMEOUT)
+        info["actions"].append("power-shell wakeup")
+        time.sleep(1)
+    windows, size = harmony_windows(hdc, serial)
+    locked = harmony_locked(windows)
+    if locked:
+        w, h = size or HARMONY_DEFAULT_SCREEN
+        x, y1, y2 = w // 2, int(h * 0.8), int(h * 0.25)
+        run([hdc, "-t", serial, "shell", "uinput", "-T", "-m",
+             str(x), str(y1), str(x), str(y2), "300"], timeout=WAKE_CMD_TIMEOUT)
+        info["actions"].append(f"uinput 上滑解锁 ({x},{y1})→({x},{y2})")
+        time.sleep(1.5)
+        locked = harmony_locked(harmony_windows(hdc, serial)[0])
+        if locked:
+            info["notes"].append("上滑后仍在锁屏(多半设了 PIN/密码),请手动解锁后重试")
+    info["locked"] = locked
+    if keep_awake:
+        rc, out, _ = run([hdc, "-t", serial, "shell", "power-shell", "timeout",
+                          "-o", str(KEEP_AWAKE_MS)], timeout=WAKE_CMD_TIMEOUT)
+        if rc == 0 and "Override" in (out or ""):
+            info["actions"].append(f"power-shell timeout -o {KEEP_AWAKE_MS}")
+            info["restore"] = {"type": "harmony_timeout", "prev": override_prev}
+    info["state"] = harmony_power(hdc, serial)[0]
+    return info
+
+
+def wake_device(platform_, kind, device_id, keep_awake=True):
+    """亮屏 + 解锁 + 防再次熄屏;返回可直接塞进结果 JSON 的 dict。"""
+    if not device_id:
+        return {"attempted": False, "reason": "no_device_id"}
+    if platform_ == "android":
+        adb = tool("adb")
+        return (wake_android(adb, device_id, keep_awake) if adb
+                else {"attempted": False, "reason": "adb_missing"})
+    if platform_ == "harmony":
+        hdc = hdc_tool()
+        return (wake_harmony(hdc, device_id, keep_awake) if hdc
+                else {"attempted": False, "reason": "hdc_missing"})
+    if kind == "simulator":     # iOS 模拟器不会熄屏,也没有锁屏
+        return {"attempted": False, "reason": "ios_simulator_no_lockscreen"}
+    return {"attempted": False, "reason": "ios_physical_manual_unlock",
+            "notes": ["iOS 真机无法程序解锁:请手动解锁,并把「设置 → 显示与亮度 → "
+                      "自动锁定」设为「永不」"]}
+
+
+def safe_wake(platform_, kind, device_id, keep_awake):
+    """亮屏是锦上添花:任何异常都吞掉,绝不让 acquire 因此失败。"""
+    try:
+        info = wake_device(platform_, kind, device_id, keep_awake)
+    except Exception as e:  # noqa: BLE001
+        return {"attempted": False, "reason": f"error: {e}"}
+    if info.get("attempted"):
+        acted = ", ".join(info.get("actions") or []) or "无需操作"
+        locked = info.get("locked")
+        lock_txt = {True: "仍锁屏", False: "已解锁", None: "锁屏状态未知"}[locked]
+        log(f"屏幕: {info.get('state') or '状态未知'} / {lock_txt}({acted})")
+    for n in info.get("notes") or []:
+        log(f"屏幕: {n}")
+    return info
+
+
+def record_screen_restore(key, screen):
+    """把待还原的原值记进锁,**只记第一次**。
+
+    重复 wake(测试中途反复熄屏)时若覆写,第二次读到的"原值"已经是我们自己设的
+    常亮值,release 就会把设备永久留在常亮状态。
+    """
+    r = (screen or {}).get("restore")
+    if not r or not key:
+        return
+    meta = read_lock(key)
+    if meta is None or meta.get("screen_restore"):
+        return
+    update_lock(key, screen_restore=r)
+
+
+def restore_screen(meta):
+    """release / 回收陈旧锁时还原 acquire 改过的屏幕超时设置(尽力而为)。"""
+    r = (meta or {}).get("screen_restore")
+    dev = (meta or {}).get("device_id")
+    if not isinstance(r, dict) or not dev:
+        return None
+    try:
+        if r.get("type") == "android_stayon":
+            adb = tool("adb")
+            if not adb:
+                return None
+            rc, _, _ = run([adb, "-s", dev, "shell", "settings", "put", "global",
+                            "stay_on_while_plugged_in", str(r.get("prev", "0"))],
+                           timeout=RESTORE_TIMEOUT)
+            return "android_stayon" if rc == 0 else None
+        if r.get("type") == "harmony_timeout":
+            hdc = hdc_tool()
+            if not hdc:
+                return None
+            prev = r.get("prev")
+            tail = ["-o", str(prev)] if prev else ["-r"]
+            rc, _, _ = run([hdc, "-t", dev, "shell", "power-shell", "timeout"] + tail,
+                           timeout=RESTORE_TIMEOUT)
+            return "harmony_timeout" if rc == 0 else None
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 # ---------- 候选组装 ----------
 
 def cand(tier, platform_, kind, key, name, device_id, needs_boot):
@@ -766,46 +1099,85 @@ def cand(tier, platform_, kind, key, name, device_id, needs_boot):
             "name": name, "device_id": device_id, "needs_boot": needs_boot}
 
 
-def gather_candidates(platform_filter, no_physical, warnings):
-    """按优先级组装候选:tier1 真机 > tier2 已运行模拟器 > tier3 已停止模拟器。"""
-    want_android = platform_filter in ("android", "any")
-    want_ios = platform_filter in ("ios", "any") and have_simctl()
+def gather_candidates(platforms, no_physical, warnings):
+    """按优先级组装候选:tier1 真机 > tier2 已运行模拟器 > tier3 已停止模拟器。
+
+    platforms 是有序列表(如 ["android", "harmony"]):tier 之间严格有序,同一 tier
+    内按这个顺序排——所以 `--platform android,harmony` = 先 Android 后鸿蒙。
+    """
     t1, t2, t3 = [], [], []
-    if want_android:
-        devs, adb = adb_devices(warnings)
-        running_avds = {}
-        for d in devs:
-            if d["is_emulator"]:
-                avd = avd_for_serial(adb, d["serial"])
-                if avd:
-                    running_avds[avd] = d["serial"]
-                else:
-                    warnings.append(f"{d['serial']} 无法反查 AVD 名,跳过该实例")
-            elif not no_physical:
-                t1.append(cand(1, "android", "physical",
-                               f"android-device:{d['serial']}",
-                               d["serial"], d["serial"], False))
-        for avd in sorted(running_avds):
-            t2.append(cand(2, "android", "emulator", f"android-avd:{avd}",
-                           avd, running_avds[avd], False))
-        for avd in sorted(list_avds(),
-                          key=lambda a: (0 if a.startswith("ai-test-") else 1, a)):
-            if avd not in running_avds:
-                t3.append(cand(3, "android", "emulator", f"android-avd:{avd}",
-                               avd, None, True))
-    if want_ios:
-        if not no_physical:
-            for d in ios_physicals(warnings):
-                t1.append(cand(1, "ios", "physical", f"ios-device:{d['udid']}",
-                               d["name"], d["udid"], False))
-        booted, shutdown = ios_sims()
-        for s in booted:
-            t2.append(cand(2, "ios", "simulator", f"ios-sim:{s['udid']}",
-                           s["name"], s["udid"], False))
-        for s in shutdown:
-            t3.append(cand(3, "ios", "simulator", f"ios-sim:{s['udid']}",
-                           s["name"], s["udid"], True))
+    for plat in platforms:
+        if plat == "android":
+            devs, adb = adb_devices(warnings)
+            running_avds = {}
+            for d in devs:
+                if d["is_emulator"]:
+                    avd = avd_for_serial(adb, d["serial"])
+                    if avd:
+                        running_avds[avd] = d["serial"]
+                    else:
+                        warnings.append(f"{d['serial']} 无法反查 AVD 名,跳过该实例")
+                elif not no_physical:
+                    t1.append(cand(1, "android", "physical",
+                                   f"android-device:{d['serial']}",
+                                   d["serial"], d["serial"], False))
+            for avd in sorted(running_avds):
+                t2.append(cand(2, "android", "emulator", f"android-avd:{avd}",
+                               avd, running_avds[avd], False))
+            for avd in sorted(list_avds(),
+                              key=lambda a: (0 if a.startswith("ai-test-") else 1, a)):
+                if avd not in running_avds:
+                    t3.append(cand(3, "android", "emulator", f"android-avd:{avd}",
+                                   avd, None, True))
+        elif plat == "ios" and have_simctl():
+            if not no_physical:
+                for d in ios_physicals(warnings):
+                    t1.append(cand(1, "ios", "physical", f"ios-device:{d['udid']}",
+                                   d["name"], d["udid"], False))
+            booted, shutdown = ios_sims()
+            for s in booted:
+                t2.append(cand(2, "ios", "simulator", f"ios-sim:{s['udid']}",
+                               s["name"], s["udid"], False))
+            for s in shutdown:
+                t3.append(cand(3, "ios", "simulator", f"ios-sim:{s['udid']}",
+                               s["name"], s["udid"], True))
+        elif plat == "harmony":
+            # 鸿蒙只分配「已经连着的」目标:真机 tier1、已启动的模拟器 tier2。
+            # 启动/新建鸿蒙模拟器归 deveco-studio-emulator 管,本 skill 不碰,
+            # 因此鸿蒙候选永远 needs_boot=False,不触发内存闸门。
+            for d in hdc_devices(warnings)[0]:
+                if d["is_emulator"]:
+                    t2.append(cand(2, "harmony", "emulator",
+                                   f"harmony-emu:{d['serial']}",
+                                   d["serial"], d["serial"], False))
+                elif not no_physical:
+                    t1.append(cand(1, "harmony", "physical",
+                                   f"harmony-device:{d['serial']}",
+                                   d["serial"], d["serial"], False))
     return t1 + t2 + t3
+
+
+PLATFORM_CHOICES = ("android", "ios", "harmony", "any")
+
+
+def parse_platforms(spec):
+    """--platform 解析:单值或逗号组合,返回去重后的有序列表。
+
+    `any` 只展开成 android+ios,**不含 harmony**:标准 Flutter SDK 编不出 hap,
+    把鸿蒙设备塞给「两端皆可」的项目会直接跑不起来。要用鸿蒙必须显式点名
+    (`--platform harmony` 或 `--platform android,harmony`)。
+    """
+    raw = [s.strip().lower() for s in (spec or "android").split(",") if s.strip()]
+    out = []
+    for item in raw:
+        if item not in PLATFORM_CHOICES:
+            fail(EXIT_ARGS, "ARGS",
+                 f"--platform 未知取值 {item!r}(可选 {'/'.join(PLATFORM_CHOICES)},"
+                 f"支持逗号组合如 android,harmony)")
+        for p in (("android", "ios") if item == "any" else (item,)):
+            if p not in out:
+                out.append(p)
+    return out
 
 
 # ---------- 创建层 ----------
@@ -987,6 +1359,10 @@ def build_result(c, owner, project, created, booted, reused):
                                f"--target=integration_test/app_test.dart -d {dev}")}
     if c["platform"] == "android":
         usage["adb"] = f"adb -s {dev} <command>"
+    elif c["platform"] == "harmony":
+        usage["hdc"] = f"{hdc_tool() or 'hdc'} -t {dev} <command>"
+        usage["note"] = ("鸿蒙设备需用 OpenHarmony 版 Flutter SDK(flutter build hap),"
+                         "且项目要有 ohos 模块")
     return {"ok": True, "action": "acquire",
             "device_key": c["key"], "platform": c["platform"], "kind": c["kind"],
             "device_id": dev, "name": c["name"],
@@ -1053,6 +1429,11 @@ def reuse_existing(meta, args, warnings):
          "key": meta["device_key"], "name": meta.get("name"),
          "device_id": meta.get("device_id"), "needs_boot": False,
          "memory_mb": meta.get("memory_mb")}
+    if meta["platform"] == "harmony":
+        # 鸿蒙设备本 skill 不负责启动:还在线就继续用,断了就当场放弃、另行分配
+        if not any(d["serial"] == c["device_id"] for d in hdc_devices(warnings)[0]):
+            raise BootFailure(f"鸿蒙设备 {c['device_id']} 已不在 hdc 目标列表(断连或关机)")
+        return c
     if meta["kind"] == "physical":
         return c
     if meta["platform"] == "android":
@@ -1080,16 +1461,47 @@ def flush_warnings(warnings):
         log(w)
 
 
+def finish_acquire(c, owner, project, created, booted, reused, args, warnings):
+    """收尾:亮屏解锁 → 输出结果 JSON(亮屏失败不影响分配结果)。"""
+    if args.no_wake:
+        screen = {"attempted": False, "reason": "disabled_by_--no-wake"}
+    else:
+        screen = safe_wake(c["platform"], c["kind"], c.get("device_id"),
+                           not args.no_keep_awake)
+        record_screen_restore(c["key"], screen)
+    result = build_result(c, owner, project, created, booted, reused)
+    result["screen"] = screen
+    flush_warnings(warnings)
+    emit(result)
+
+
+def resolve_acquire_platforms(args, warnings):
+    """解析 --platform,并剔除本机工具链缺失的平台(只剩一个平台时直接报错)。"""
+    platforms = parse_platforms(args.platform)
+    for plat, ok, why in (
+            ("ios", have_simctl(),
+             "本机没有 xcrun/simctl,无法分配 iOS 设备(iOS 仅支持 macOS + Xcode)"),
+            ("harmony", hdc_tool() is not None,
+             "找不到 hdc(HarmonyOS 设备连接器),无法分配鸿蒙设备")):
+        if plat in platforms and not ok:
+            if platforms == [plat]:
+                hint = ("装 DevEco Studio,或设环境变量 HDC_PATH 指向 hdc 可执行文件"
+                        "(通常在 <DevEco 安装目录>/sdk/default/openharmony/toolchains/hdc)"
+                        if plat == "harmony" else None)
+                fail(EXIT_ENV_MISSING, "ENV_MISSING", why, hint=hint)
+            platforms.remove(plat)
+            warnings.append(f"{why},本次跳过该平台")
+    return platforms
+
+
 def cmd_acquire(args):
     owner = args.owner or default_owner_pid()
     project = os.path.abspath(args.project or os.getcwd())
     warnings = []
     sweep_stale_locks()
-    if args.platform == "ios" and not have_simctl():
-        fail(EXIT_ENV_MISSING, "ENV_MISSING",
-             "本机没有 xcrun/simctl,无法分配 iOS 设备(iOS 仅支持 macOS + Xcode)")
+    platforms = resolve_acquire_platforms(args, warnings)
     args.memory = resolve_memory_mb(args.memory)
-    if args.memory and args.platform == "ios":
+    if args.memory and platforms == ["ios"]:
         warnings.append("--memory 仅对 Android 模拟器生效,iOS 模拟器不是 VM,本次忽略")
 
     # 幂等重取:同 owner + project 的存活锁直接复用,不多占设备
@@ -1099,21 +1511,22 @@ def cmd_acquire(args):
         try:
             c = reuse_existing(mine, args, warnings)
             update_lock(c["key"], acquired_at=now_iso())
-            flush_warnings(warnings)
-            emit(build_result(c, owner, project,
-                              created=mine.get("created_by_allocator", False),
-                              booted=mine.get("booted_by_allocator", False), reused=True))
+            finish_acquire(c, owner, project,
+                           created=mine.get("created_by_allocator", False),
+                           booted=mine.get("booted_by_allocator", False), reused=True,
+                           args=args, warnings=warnings)
         except BootFailure as e:
             log(f"已持设备恢复失败({e}),释放后重新分配")
             release_lock(mine["device_key"])
 
     explicit = bool(args.device)
-    # 只有 --platform android 才能确定新起的是 Android 模拟器,按 --memory 收窄每台开销;
-    # any / ios 可能落到无法限内存的 iOS 模拟器上,仍按保守默认估算。
+    # 只有纯 Android 才能确定新起的是 Android 模拟器,按 --memory 收窄每台开销;
+    # 混了 ios 时可能落到无法限内存的 iOS 模拟器上,仍按保守默认估算。
     gate = mem_policy(max_override=args.max_emulators, ignore=args.mem_override,
-                      memory_mb=args.memory if args.platform == "android" else None)
+                      memory_mb=args.memory if platforms == ["android"] else None,
+                      include_harmony="harmony" in platforms)
     mem_blocked = False
-    cands = gather_candidates(args.platform,
+    cands = gather_candidates(platforms,
                               False if explicit else args.no_physical, warnings)
     if explicit:
         matches = [c for c in cands
@@ -1171,8 +1584,8 @@ def cmd_acquire(args):
                 fail(EXIT_BOOT_TIMEOUT, "BOOT_TIMEOUT", f"{c['name']} 启动失败: {e}")
             log(f"{c['name']} 启动失败({e}),换下一个候选")
             continue
-        flush_warnings(warnings)
-        emit(build_result(c, owner, project, created=False, booted=booted, reused=False))
+        finish_acquire(c, owner, project, created=False, booted=booted, reused=False,
+                       args=args, warnings=warnings)
 
     if args.no_create:
         if mem_blocked:
@@ -1189,10 +1602,17 @@ def cmd_acquire(args):
         log(f"内存闸门:{gate['warning']}")
         mem_warned = True
 
-    if args.platform == "any":
-        create_order = ["ios", "android"] if have_simctl() else ["android"]
-    else:
-        create_order = [args.platform]
+    # 只有 Android / iOS 能由本 skill 新建;鸿蒙模拟器交给 deveco-studio-emulator。
+    # `--platform any` 保持「先建 iOS(更快)再建 Android」。
+    creatable = [p for p in platforms if p in ("android", "ios")]
+    any_spec = "any" in [s.strip().lower() for s in (args.platform or "").split(",")]
+    create_order = ([p for p in ("ios", "android") if p in creatable] if any_spec
+                    else creatable)
+    if not create_order:
+        fail(EXIT_NO_DEVICE, "NO_DEVICE",
+             "没有空闲的鸿蒙设备,且本 skill 不负责启动/新建鸿蒙模拟器",
+             hint="连上鸿蒙真机,或用 deveco-studio-emulator skill 先把鸿蒙模拟器跑起来"
+                  "再重试;也可以加上 Android:--platform android,harmony")
 
     last_env_fail = None
     for plat in create_order:
@@ -1217,8 +1637,8 @@ def cmd_acquire(args):
                 fail(EXIT_BOOT_TIMEOUT, "BOOT_TIMEOUT",
                      f"新建 iOS 模拟器 {name} 启动失败: {e}")
             update_lock(c["key"], booted_by_allocator=True)
-            flush_warnings(warnings)
-            emit(build_result(c, owner, project, created=True, booted=True, reused=False))
+            finish_acquire(c, owner, project, created=True, booted=True, reused=False,
+                           args=args, warnings=warnings)
         else:
             if not tool("adb") or not tool("emulator") or not tool("avdmanager"):
                 last_env_fail = "Android SDK 不完整(需要 platform-tools、emulator、cmdline-tools)"
@@ -1245,11 +1665,13 @@ def cmd_acquire(args):
                 release_lock(c["key"])
                 fail(EXIT_BOOT_TIMEOUT, "BOOT_TIMEOUT", f"新建 AVD {name} 启动失败: {e}")
             update_lock(c["key"], device_id=c["device_id"], booted_by_allocator=True)
-            flush_warnings(warnings)
-            emit(build_result(c, owner, project, created=True, booted=True, reused=False))
+            finish_acquire(c, owner, project, created=True, booted=True, reused=False,
+                           args=args, warnings=warnings)
 
-    platform_hint = ("默认平台是 android;要用 iOS 模拟器传 --platform ios,两端皆可传 --platform any"
-                     if args.platform == "android" else None)
+    platform_hint = ("默认平台是 android;要用 iOS 模拟器传 --platform ios,两端皆可传 "
+                     "--platform any;Flutter 项目有 ohos 模块、且本次功能不是鸿蒙特有的,"
+                     "可以放开到 --platform android,harmony"
+                     if platforms == ["android"] else None)
     if last_env_fail:
         fail(EXIT_ENV_MISSING, "ENV_MISSING", f"无空闲设备且无法新建: {last_env_fail}",
              hint=platform_hint)
@@ -1279,6 +1701,71 @@ def cmd_release(args):
     if released:
         log(f"已释放: {', '.join(released)}(模拟器保持运行,供下个会话复用)")
     emit({"ok": True, "action": "release", "released": released, "not_found": not_found})
+
+
+def infer_device(device_id, warnings):
+    """没有锁记录时,从当前连着的设备反查它属于哪个平台。"""
+    for d in adb_devices(warnings)[0]:
+        if d["serial"] == device_id:
+            return {"platform": "android",
+                    "kind": "emulator" if d["is_emulator"] else "physical",
+                    "device_id": device_id, "name": device_id}
+    if hdc_tool():
+        for d in hdc_devices(warnings)[0]:
+            if d["serial"] == device_id:
+                return {"platform": "harmony",
+                        "kind": "emulator" if d["is_emulator"] else "physical",
+                        "device_id": device_id, "name": device_id}
+    for s in ios_sims()[0]:
+        if s["udid"] == device_id:
+            return {"platform": "ios", "kind": "simulator",
+                    "device_id": device_id, "name": s["name"]}
+    return None
+
+
+def cmd_wake(args):
+    """把设备重新点亮解锁——测到一半熄屏时调它,不用重新 acquire。"""
+    warnings = []
+    targets = []
+    if args.key:
+        m = read_lock(args.key)
+        if not m:
+            fail(EXIT_NO_DEVICE, "NO_DEVICE", f"找不到锁 {args.key}",
+                 hint="用 status 看当前有哪些锁")
+        targets.append(m)
+    elif args.device:
+        targets = [m for _, m, _ in list_locks()
+                   if m and args.device in (m.get("device_id"), m.get("name"))]
+        if not targets:
+            guessed = infer_device(args.device, warnings)
+            if not guessed:
+                fail(EXIT_NO_DEVICE, "NO_DEVICE",
+                     f"设备 {args.device} 既不在锁记录里,也不在当前连着的设备中",
+                     hint="用 status 看设备与锁全景")
+            targets.append(guessed)
+    else:   # 默认:本会话(owner+project)持有的设备;--all-mine 则按 owner 全取
+        owner = args.owner or default_owner_pid()
+        project = os.path.abspath(args.project or os.getcwd())
+        if args.all_mine:
+            targets = [m for _, m, _ in list_locks() if m and m.get("owner_pid") == owner]
+        else:
+            mine = find_my_lock(owner, project)
+            if mine:
+                targets.append(mine)
+        if not targets:
+            fail(EXIT_NO_DEVICE, "NO_DEVICE", "本会话没有持有任何设备锁",
+                 hint="先 acquire;或用 --device <id> 指定要点亮的设备")
+
+    results = []
+    for m in targets:
+        screen = safe_wake(m.get("platform"), m.get("kind"), m.get("device_id"),
+                           not args.no_keep_awake)
+        record_screen_restore(m.get("device_key"), screen)
+        results.append({"device_key": m.get("device_key"), "platform": m.get("platform"),
+                        "device_id": m.get("device_id"), "name": m.get("name"),
+                        "screen": screen})
+    flush_warnings(warnings)
+    emit({"ok": True, "action": "wake", "results": results})
 
 
 def cmd_status(args):
@@ -1332,6 +1819,16 @@ def cmd_status(args):
                 avd_ram_mb(avd))
     for d in ios_physicals(warnings):
         add(f"ios-device:{d['udid']}", "ios", "physical", d["udid"], d["name"], "connected")
+    harmony_vms = 0
+    if hdc_tool():
+        for d in hdc_devices(warnings)[0]:
+            if d["is_emulator"]:
+                harmony_vms += 1
+                add(f"harmony-emu:{d['serial']}", "harmony", "emulator",
+                    d["serial"], d["serial"], "running")
+            else:
+                add(f"harmony-device:{d['serial']}", "harmony", "physical",
+                    d["serial"], d["serial"], "connected")
     booted, shutdown = ios_sims()
     for s in booted:
         add(f"ios-sim:{s['udid']}", "ios", "simulator", s["udid"], s["name"], "booted")
@@ -1352,7 +1849,7 @@ def cmd_status(args):
     max_vms = env_max_vms()
     if max_vms is None:
         max_vms = auto_max_vms(total)
-    running_vms = len(running_avds) + len(booted)
+    running_vms = len(running_avds) + len(booted) + harmony_vms
     # 与 mem_policy 同规则:0 台在跑时可用内存检查不拦第一台。
     quota_ok = max_vms is None or running_vms < max_vms
     avail_ok = (running_vms == 0 or avail is None
@@ -1379,6 +1876,7 @@ def cmd_clean(args):
             stale = state == "STALE"
         if stale and reclaim_path(path):
             removed.append(label)
+            restore_screen(meta)
         else:
             kept.append(label)
     emit({"ok": True, "action": "clean", "removed": removed, "kept": kept})
@@ -1392,8 +1890,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("acquire", help="领取并锁定一台空闲设备")
-    a.add_argument("--platform", choices=["android", "ios", "any"], default="android",
-                   help="平台(默认 android;Flutter 项目未指明平台时按默认走,两端皆可用 any)")
+    a.add_argument("--platform", default="android",
+                   metavar="{android,ios,harmony,any,逗号组合}",
+                   help="平台(默认 android;两端皆可用 any=android+ios;鸿蒙需显式点名,"
+                        "如 harmony 或 android,harmony——同 tier 内按所列顺序优先)")
     a.add_argument("--device", help="指定设备(serial / UDID / AVD 名),只尝试它")
     a.add_argument("--no-physical", action="store_true", help="排除真机")
     a.add_argument("--no-create", action="store_true", help="只复用现有设备,不新建")
@@ -1414,6 +1914,20 @@ def main():
                         "新建的 AVD 写进 config.ini,启动已有 AVD 只本次覆盖);"
                         "内存闸门的每台开销随之变小,压小可多跑一台。"
                         "环境变量 AI_DEVICE_EMULATOR_MEMORY 亦可设定;iOS 模拟器不支持")
+    a.add_argument("--no-wake", action="store_true",
+                   help="不做亮屏解锁(默认会唤醒并尝试解锁分配到的设备)")
+    a.add_argument("--no-keep-awake", action="store_true",
+                   help="亮屏但不修改屏幕超时/常亮设置(默认会拉长,release 时还原)")
+
+    w = sub.add_parser("wake", help="把设备重新亮屏解锁(测试中途熄屏时用)")
+    wg = w.add_mutually_exclusive_group()
+    wg.add_argument("--key", help="按 device_key 指定")
+    wg.add_argument("--device", help="按 device id / 名称指定(不在锁里也能点亮)")
+    wg.add_argument("--all-mine", action="store_true", help="本 owner 持有的全部设备")
+    w.add_argument("--owner", type=int, help="锁持有者 pid(默认取会话进程)")
+    w.add_argument("--project", help="项目路径(默认当前目录,用于定位本会话的锁)")
+    w.add_argument("--no-keep-awake", action="store_true",
+                   help="只亮屏解锁,不修改屏幕超时/常亮设置")
 
     r = sub.add_parser("release", help="释放锁(幂等,恒 exit 0)")
     g = r.add_mutually_exclusive_group(required=True)
@@ -1431,7 +1945,7 @@ def main():
     args = ap.parse_args()
     _ACTION = args.cmd
     try:
-        {"acquire": cmd_acquire, "release": cmd_release,
+        {"acquire": cmd_acquire, "release": cmd_release, "wake": cmd_wake,
          "status": cmd_status, "clean": cmd_clean}[args.cmd](args)
     except SystemExit:
         raise

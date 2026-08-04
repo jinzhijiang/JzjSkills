@@ -80,7 +80,7 @@ description: 简短描述这个 skill 做什么
 | `flutter-setup-firebase-crashlytics` | 自建 / 内部整理 | [Firebase Flutter 官方文档](https://firebase.google.com/docs/flutter/setup) | — | 2026-07-18 | 自建；默认完整接入 Firebase Core、Google Analytics 与 Crashlytics，并要求设备上报验证和临时崩溃入口清理 |
 | `flutter-use-fvm` | 自建 / FVM 官方文档整理 | [FVM Documentation](https://fvm.app/documentation/getting-started/overview) | — | 2026-07-18 | 自建；强制 Flutter/Dart 命令通过 `fvm flutter` / `fvm dart` 执行，并按需覆盖完整配置、命令、IDE/CI 与故障排查 |
 | `flutter-google-play-release` | 自建 / Google Play 上架实操整理 | — | — | 2026-07-30 | 自建；Flutter Android 首发与更新的证据审计、商店资料、政策声明、IARC、AAB、质量建议和最终送审确认门 |
-| `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-07-26 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器 |
+| `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-04 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`），并在 acquire 后自动亮屏解锁、release 时还原屏幕设置 |
 
 ## 更新已引入的 Skill
 
