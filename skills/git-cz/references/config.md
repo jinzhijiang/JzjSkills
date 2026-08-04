@@ -120,7 +120,7 @@ maxLength: config.maxMessageLength - 3,
 
 ## 与 conventional-changelog 生态的兼容性
 
-标题把 emoji 放在最前面(`🎸 feat: …`),而 `conventional-changelog` /
+标题把 emoji 放在最前面(`✨ feat: …`),而 `conventional-changelog` /
 `semantic-release` / `standard-version` 的默认 parser 认的是
 `/^(\w*)(?:\((.*)\))?: (.*)$/`——**开头多一个 emoji 就整条匹配不上**,
 自动生成的 CHANGELOG 会把这些提交全部归到「其他」或直接丢弃。

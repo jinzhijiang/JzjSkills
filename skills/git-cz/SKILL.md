@@ -17,7 +17,7 @@ description: 用 git-cz 统一所有项目的 Git 提交信息风格(emoji + Con
                                   ← 空行
 {body}
                                   ← 空行
-BREAKING CHANGE: 🧨 {breaking}
+BREAKING CHANGE: 💥 {breaking}
                                   ← 空行
 ✅ Closes: {issues}
 ```
@@ -25,11 +25,11 @@ BREAKING CHANGE: 🧨 {breaking}
 `{emoji}` 展开为「emoji + 一个空格」,`{scope}` 为空时整体消失。完整实例:
 
 ```
-🎸 feat(auth): 新增短信登录
+✨ feat(auth): 新增短信登录
 
 接入 aliyun sms;失败自动降级到密码登录
 
-BREAKING CHANGE: 🧨 移除了 loginWithCode 旧接口
+BREAKING CHANGE: 💥 移除了 loginWithCode 旧接口
 
 ✅ Closes: #42
 ```
@@ -38,21 +38,41 @@ BREAKING CHANGE: 🧨 移除了 loginWithCode 旧接口
 
 ## 类型表
 
-| type | emoji | 用途 |
-|---|---|---|
-| `feat` | 🎸 | 新功能 |
-| `fix` | 🐛 | 修复 Bug |
-| `docs` | ✏️ | 仅文档变动 |
-| `style` | 💄 | 代码风格、格式、空格、分号(不改行为) |
-| `refactor` | 💡 | 重构:既非新功能也非 Bug 修复 |
-| `perf` | ⚡️ | 性能优化 |
-| `test` | 💍 | 添加或修改测试 |
-| `chore` | 🤖 | 构建过程或辅助工具的变动 |
-| `ci` | 🎡 | CI 相关的变动 |
-| `release` | 🏹 | 发布版本 |
+| type | emoji | 用途 | gitmoji 原义 |
+|---|---|---|---|
+| `feat` | ✨ | 新功能 | `:sparkles:` Introduce new features |
+| `fix` | 🐛 | 修复 Bug | `:bug:` Fix a bug |
+| `docs` | 📝 | 仅文档变动 | `:memo:` Add or update documentation |
+| `style` | 🎨 | 代码风格、格式、空格、分号(不改行为) | `:art:` Improve structure / format of the code |
+| `refactor` | ♻️ | 重构:既非新功能也非 Bug 修复 | `:recycle:` Refactor code |
+| `perf` | ⚡️ | 性能优化 | `:zap:` Improve performance |
+| `test` | ✅ | 添加或修改测试 | `:white_check_mark:` Add, update, or pass tests |
+| `chore` | 🔧 | 构建过程或辅助工具的变动 | `:wrench:` Add or update configuration files |
+| `ci` | 👷 | CI 相关的变动 | `:construction_worker:` Add or update CI build system |
+| `release` | 🔖 | 发布版本 | `:bookmark:` Release / Version tags |
+
+页脚的破坏性变更前缀是 💥(`:boom:` Introduce breaking changes)。
 
 选型有歧义时:改了行为选 `feat`/`fix`,只挪代码不改行为选 `refactor`,只动格式选 `style`,
 依赖 / 脚手架 / 配置选 `chore`。emoji 与 type 是死绑定,不能自由搭配。
+
+## 为什么是这些 emoji(与 gitmoji 对齐)
+
+emoji 取自 [gitmoji](https://gitmoji.dev/) 官方列表,含义与它一致——别人扫 `git log`
+不会把我们的意思读岔。gitmoji 自己的规范是 `<intention> [scope?][:?] <message>`:
+emoji 即意图、没有 type 词。我们**只借它的 emoji 语义,不套它的格式**,type 词照留
+(git-cz 的 `format` 必须含 `{type}`,校验与 changelog 生态也都靠它)。
+
+对应关系见上方类型表。
+
+- **只用 unicode,不用 `:shortcode:`**。gitmoji 两种都认:shortcode 要靠平台渲染,
+  GitHub 与 GitLab 的命名还有出入,`git log` 里也只是一串文本;unicode 更省字符、
+  终端里直接可读。
+- **✅ 在本契约里出现两次**:标题里是 `test`,页脚 `✅ Closes:` 是 git-cz 的固定前缀。
+  位置不同不会解析歧义,但别把页脚那个读成测试。
+- 早先这张表用的是 git-cz 自带的 emoji,其中 💡(gitmoji:加注释)、✏️(改错别字)、
+  💄(UI 样式文件)与 gitmoji 语义**正面冲突**,🎸 💍 🤖 🎡 🏹 🧨 则根本不在 gitmoji 表里
+  ——这就是换掉它们的原因。`🐛` `⚡️` 两个本来就一致,没动。
 
 ## 硬约束
 
@@ -66,7 +86,7 @@ BREAKING CHANGE: 🧨 移除了 loginWithCode 旧接口
 - 标题显示宽度建议 ≤ 72 列(**中文一个字算 2 列**,所以中文主题控制在 30 字以内)。
 - 标题与正文之间必须空一行;正文与页脚之间也是。
 - 正文每行 ≤ 72 列,超了自己换行(交互式 git-cz 会自动折行,手写要自己折)。
-- 破坏性变更必须是 `BREAKING CHANGE: 🧨 …`,全大写、冒号后一个空格。
+- 破坏性变更必须是 `BREAKING CHANGE: 💥 …`,全大写、冒号后一个空格。
 - `scope` 只能从配置的 `scopes` 里选;`scopes` 为空(默认)时**不写 scope**。
 - Merge / Revert / fixup! / squash! 提交由 git 生成,不套这套格式。
 
@@ -88,7 +108,7 @@ npx git-cz --non-interactive --type=feat --scope=auth --subject="新增短信登
 
 ```bash
 cat > /tmp/commitmsg <<'EOF'
-🎸 feat(auth): 新增短信登录
+✨ feat(auth): 新增短信登录
 
 接入 aliyun sms;失败自动降级到密码登录
 EOF
@@ -142,8 +162,12 @@ python3 <skill根>/scripts/check_commit_msg.py show-config          # 看当前�
 
 - **改了配置但没生效**:`.git-cz.json` 优先级高于 `changelog.config.js`,同目录下前者赢;
   查找从 git 根目录起向上,放在子目录里的配置**永远不会被读到**。
-- **emoji 位置**:本契约 emoji 在最前(`🎸 feat: …`),git-cz 默认模板是在冒号后
-  (`feat: 🎸 …`)。抄网上例子时注意区别。
+- **emoji 位置与用哪一套**:本契约 emoji 在最前、用 gitmoji 对齐的那套(`✨ feat: …`);
+  git-cz 自带的默认模板把 emoji 放在冒号后、且用它自己的一套(`feat: 🎸 …`)。
+  抄网上例子时注意区别。
+- **没装配置就不是这套契约**:找不到 `changelog.config.js` 时,交互式 git-cz 与
+  `check_commit_msg.py` 会**双双**退回 git-cz 4.9.0 的内置默认值(`🎸 feat`、`🧨` 破坏性变更)。
+  两者仍然一致、不会互相打架,但那不是 gitmoji 对齐的这套。新机器先复制配置再提交。
 - **前导 emoji 会打断 conventional-changelog / semantic-release 的默认解析**,
   以后要自动出 CHANGELOG 得定制 `headerPattern`,或改用 `disableEmoji: true`。
 - **`scopes: []` 会让交互式完全不问 scope**,不是「随便填」。

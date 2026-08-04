@@ -10,10 +10,10 @@
  */
 module.exports = {
   // false = 保留 emoji。改成 true 后全仓库不再输出 emoji,
-  // 且 BREAKING CHANGE / Closes 前缀里的 🧨 ✅ 也一并消失。
+  // 且 BREAKING CHANGE / Closes 前缀里的 💥 ✅ 也一并消失。
   disableEmoji: false,
 
-  // {emoji} 会被展开成「emoji + 一个空格」,所以结果是 `🎸 feat(scope): 主题`。
+  // {emoji} 会被展开成「emoji + 一个空格」,所以结果是 `✨ feat(scope): 主题`。
   // 可用占位符仅 {emoji} {type} {scope} {subject};scope 为空时 {scope} 展开成空串。
   format: '{emoji}{type}{scope}: {subject}',
 
@@ -49,16 +49,16 @@ module.exports = {
   scopes: [],
 
   types: {
-    feat:     { description: '新功能',                             emoji: '🎸', value: 'feat' },
+    feat:     { description: '新功能',                             emoji: '✨', value: 'feat' },
     fix:      { description: '修复 Bug',                           emoji: '🐛', value: 'fix' },
-    docs:     { description: '仅文档变动',                         emoji: '✏️', value: 'docs' },
-    style:    { description: '代码风格、格式、空格、分号等',        emoji: '💄', value: 'style' },
-    refactor: { description: '重构(既非新功能也非 Bug 修复)',     emoji: '💡', value: 'refactor' },
+    docs:     { description: '仅文档变动',                         emoji: '📝', value: 'docs' },
+    style:    { description: '代码风格、格式、空格、分号等',        emoji: '🎨', value: 'style' },
+    refactor: { description: '重构(既非新功能也非 Bug 修复)',     emoji: '♻️', value: 'refactor' },
     perf:     { description: '性能优化',                           emoji: '⚡️', value: 'perf' },
-    test:     { description: '添加或修改测试',                     emoji: '💍', value: 'test' },
-    chore:    { description: '构建过程或辅助工具的变动',           emoji: '🤖', value: 'chore' },
-    ci:       { description: 'CI 相关的变动',                      emoji: '🎡', value: 'ci' },
-    release:  { description: '发布版本',                           emoji: '🏹', value: 'release' },
+    test:     { description: '添加或修改测试',                     emoji: '✅', value: 'test' },
+    chore:    { description: '构建过程或辅助工具的变动',           emoji: '🔧', value: 'chore' },
+    ci:       { description: 'CI 相关的变动',                      emoji: '👷', value: 'ci' },
+    release:  { description: '发布版本',                           emoji: '🔖', value: 'release' },
   },
 
   // 交互式提问文案(git-cz 原文案是英文,这里换成中文;键名与 questions 一一对应)。
@@ -71,8 +71,8 @@ module.exports = {
     issues: '关联并关闭的 issue,如 #123(没有就回车跳过):',
   },
 
-  // 页脚前缀;disableEmoji: true 时 🧨 / ✅ 自动省略,Closes: 保留。
-  breakingChangePrefix: '🧨 ',
+  // 页脚前缀;disableEmoji: true 时 💥 / ✅ 自动省略,Closes: 保留。
+  breakingChangePrefix: '💥 ',
   closedIssueMessage: 'Closes: ',
   closedIssuePrefix: '✅ ',
 

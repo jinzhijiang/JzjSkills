@@ -77,7 +77,7 @@ def display_width(text: str) -> int:
 
 
 def normalize_emoji(text: str) -> str:
-    """去掉变体选择符再比较,免得 ✏ 与 ✏️ 被判成两个字符。"""
+    """去掉变体选择符再比较,免得 ♻ 与 ♻️ 被判成两个字符。"""
     return text.replace("️", "").replace("︎", "")
 
 
