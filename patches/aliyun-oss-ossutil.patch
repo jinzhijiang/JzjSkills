@@ -1,0 +1,31 @@
+diff --git b/skills/aliyun-oss-ossutil/SKILL.md a/skills/aliyun-oss-ossutil/SKILL.md
+index 4b12bcd..c9b928c 100644
+--- b/skills/aliyun-oss-ossutil/SKILL.md
++++ a/skills/aliyun-oss-ossutil/SKILL.md
+@@ -11,7 +11,9 @@ Category: tool
+ ## Validation
+ 
+ ```bash
+-python skills/storage/oss/aliyun-oss-ossutil/scripts/check_ossutil.py --output output/aliyun-oss-ossutil/validate.txt
++# <skill-dir> 即本 SKILL.md 所在目录（仓库内为 skills/aliyun-oss-ossutil，
++# 部署后为 ~/.claude/skills/aliyun-oss-ossutil）；脚本自身定位参考文档，与 CWD 无关
++python3 <skill-dir>/scripts/check_ossutil.py --output output/aliyun-oss-ossutil/validate.txt
+ ```
+ 
+ Pass criteria: command exits 0 and `output/aliyun-oss-ossutil/validate.txt` is generated.
+diff --git b/skills/aliyun-oss-ossutil/scripts/check_ossutil.py a/skills/aliyun-oss-ossutil/scripts/check_ossutil.py
+index 97cb103..c2c613a 100755
+--- b/skills/aliyun-oss-ossutil/scripts/check_ossutil.py
++++ a/skills/aliyun-oss-ossutil/scripts/check_ossutil.py
+@@ -14,8 +14,9 @@ def main() -> int:
+     parser.add_argument("--output", default="output/aliyun-oss-ossutil/validate.txt")
+     args = parser.parse_args()
+ 
+-    install_doc = Path("skills/storage/oss/aliyun-oss-ossutil/references/install.md")
+-    skill_doc = Path("skills/storage/oss/aliyun-oss-ossutil/SKILL.md")
++    skill_dir = Path(__file__).resolve().parent.parent
++    install_doc = skill_dir / "references" / "install.md"
++    skill_doc = skill_dir / "SKILL.md"
+ 
+     lines = [
+         f"install_doc_exists={install_doc.exists()}",

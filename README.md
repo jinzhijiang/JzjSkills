@@ -52,6 +52,11 @@ JzjSkills/
 │           patrol-write-test、patrol-test-architecture 与 patrol-setup 同为单文件；
 │           另有 13 个 flutter-* skill（10 个 Flutter 官方 + 3 个自建），
 │           其中 flutter-setup-firebase-crashlytics 含 references/ 与 agents/）
+├── scripts/
+│   └── update_skills.py                 # 统一同步外部 skill（python3 标准库）
+├── patches/                             # 外部 skill 的本地适配，同步后自动重打
+│   └── aliyun-oss-ossutil.patch
+├── skills-upstream.json                 # 外部 skill 的上游清单（脚本读写）
 └── README.md
 ```
 
@@ -110,62 +115,70 @@ description: 简短描述这个 skill 做什么
 
 ## 更新已引入的 Skill
 
-外部来源的 skill（见上方「来源表」）可按以下方式同步上游更新。
-
-**单文件 skill**（仅 `SKILL.md`，如 `java-springboot`）——把 `github.com/…/blob/…` 换成 `raw.githubusercontent.com` 直接覆盖：
+外部来源的 skill（见上方「来源表」）由 `scripts/update_skills.py` 统一同步，清单是仓库根的 `skills-upstream.json`。
 
 ```bash
+python3 scripts/update_skills.py --list      # 哪些 skill 归脚本管
+python3 scripts/update_skills.py --check     # 只问上游有没有新提交，不改文件
+python3 scripts/update_skills.py             # 同步全部外部 skill
+```
+
+也可以只同步一部分：
+
+```bash
+python3 scripts/update_skills.py patrol-setup patrol-write-test   # 按 skill 名
+python3 scripts/update_skills.py --source patrol                  # 按上游来源
+python3 scripts/update_skills.py --no-deploy                      # 只更新仓库，不部署
+```
+
+单个 skill 的同步流程：**浅克隆上游（按需 sparse）→ `rsync --delete` 覆盖 → 补 `extra` 文件（如 `LICENSE`）→ 打本地适配 patch → 部署到 `~/.cc-switch/skills` 并补 `~/.claude/skills` 符号链接**。全部成功后把上游 commit 回写进清单，下次 `--check` 才能判断是否真有更新。脚本只改文件、不提交，结束时打印 `git diff --stat` 由人确认。
+
+几个要点：
+
+- **自建 skill 不登记在清单里，脚本永远不碰。** 这也是 `cp -R skills/flutter-*` 那种前缀通配的替代品——`flutter-google-play-release`、`flutter-setup-firebase-crashlytics`、`flutter-use-fvm` 这 3 个自建 flutter skill 不会因为上游哪天加了同名目录而被静默覆盖。
+- **本地适配存成 patch**（见 `patches/`），同步后自动重打。若上游改动了被 patch 的位置导致打不上，脚本会**报错退出（exit 1）且不部署**，此时工作区里是未打补丁的上游原样，按提示手工合并后重新生成 patch：
+
+  ```bash
+  git diff -R --src-prefix=a/ --dst-prefix=b/ -- skills/<name> > patches/<name>.patch
+  # 放弃本次同步则：git checkout -- skills/<name>
+  ```
+
+- **新引入一个外部 skill 时，记得在 `skills-upstream.json` 里加一条**，否则它不会被后续的统一更新覆盖到。字段：`src`（上游内的路径）、`exclude`（rsync 排除项）、`extra`（附带文件，如仓库根的 `LICENSE`）、`patch`（本地适配）。
+
+清单里 `commit` 为 `null` 表示引入时没记上游版本，基线未知，同步一次即可补上。
+
+<details>
+<summary>手动同步（脚本跑不了时的兜底）</summary>
+
+```bash
+# 单文件 skill（如 java-springboot）
 curl -sSL https://raw.githubusercontent.com/github/awesome-copilot/main/skills/java-springboot/SKILL.md \
   -o skills/java-springboot/SKILL.md
-```
 
-**含 `references/` 的多文件 skill**（如 `spring-*-testing`）——同步整个目录，确保参考文档一并更新：
-
-```bash
-# 浅克隆上游到临时目录，再整目录同步（--delete 会移除上游已删除的文件）
+# 含 references/ 的多文件 skill（如 spring-*-testing）
 git clone --depth 1 https://github.com/spring-ai-community/spring-testing-skills /tmp/sts
 rsync -a --delete /tmp/sts/skills/spring-jpa-testing/ skills/spring-jpa-testing/
-```
 
-**仓库根目录即 skill**（如 `codex-image`）——上游整个仓库就是一个 skill，同步时排除仓库级文件：
-
-```bash
+# 仓库根目录即 skill（如 codex-image），排除仓库级文件
 git clone --depth 1 https://github.com/xntj-ai/codex-image /tmp/codex-image
 rsync -a --delete --exclude='.git/' --exclude='README.md' --exclude='.gitignore' \
   /tmp/codex-image/ skills/codex-image/
-```
 
-**skill 只是大仓库一个角落**（如 3 个 `patrol-*`）——上游是产品主仓、体积大，用 sparse checkout 只取 `skills/`（注意主分支是 `master`）：
-
-```bash
+# skill 只是大仓库一个角落（如 patrol-*，主分支是 master）
 git clone --depth 1 --filter=blob:none --sparse https://github.com/leancodepl/patrol /tmp/patrol
 git -C /tmp/patrol sparse-checkout set skills
 cp -R /tmp/patrol/skills/patrol-* skills/
-```
 
-**上游按分层目录存放、这里拍平的 skill**（如 `aliyun-oss-ossutil`）——上游路径深、本地平铺，同步后需重新确认写死的路径：
-
-```bash
+# 上游分层、本地拍平（如 aliyun-oss-ossutil），同步后要重打本地 patch
 git clone --depth 1 https://github.com/cinience/alicloud-skills /tmp/alicloud-skills
 rsync -a --delete /tmp/alicloud-skills/skills/storage/oss/aliyun-oss-ossutil/ skills/aliyun-oss-ossutil/
 cp /tmp/alicloud-skills/LICENSE skills/aliyun-oss-ossutil/LICENSE
-# rsync 会覆盖掉本地的拍平适配，需重新应用（见「来源表」备注）：
-grep -rn 'skills/storage/oss' skills/aliyun-oss-ossutil/
+git apply -p1 patches/aliyun-oss-ossutil.patch
 ```
 
-**成套引入的同源 skill**（如 10 个 `flutter-*`）——浅克隆上游后，一次性覆盖全部同前缀目录：
+手动同步后别忘了自己部署：`rsync -a --delete skills/<name>/ ~/.cc-switch/skills/<name>/`，新 skill 还要补 `~/.claude/skills/<name>` 符号链接。
 
-```bash
-git clone --depth 1 https://github.com/flutter/skills /tmp/flutter-skills
-# 仅覆盖 skills/ 下的 flutter-* 目录，不引入上游的 resources/、tool/、.agents/ 等基建
-cp -R /tmp/flutter-skills/skills/flutter-* skills/
-```
-
-> 注意：这里用 `cp -R` 而非 `rsync --delete`——`skills/` 目录下混有其他来源的 skill，整目录 `--delete` 会误删它们。
->
-> `flutter-ui-automation` 是自建 skill、并非 flutter/skills 成员，上游没有同名目录，上面的 `cp -R flutter-*` 不会覆盖它；它的维护独立进行。
-
-完成后用 `git diff` 查看上游变更，确认无误再提交。若本地对某 skill 做过定制修改，请手动合并，避免被覆盖。
+</details>
 
 ## 使用方式
 

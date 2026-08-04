@@ -1,0 +1,169 @@
+{
+  "note": "外部引入 skill 的上游清单,供 scripts/update_skills.py 使用。只有登记在这里的 skill 会被脚本覆盖;自建 skill 不要写进来。commit 记录上次同步到的上游提交,由脚本回写;null 表示基线未知(引入时未记录),同步一次即可补上。",
+  "sources": [
+    {
+      "id": "awesome-copilot",
+      "repo": "https://github.com/github/awesome-copilot",
+      "ref": "main",
+      "commit": null,
+      "sparse": [
+        "skills/java-springboot"
+      ],
+      "skills": [
+        {
+          "name": "java-springboot",
+          "src": "skills/java-springboot"
+        }
+      ]
+    },
+    {
+      "id": "spring-testing-skills",
+      "repo": "https://github.com/spring-ai-community/spring-testing-skills",
+      "ref": "main",
+      "commit": null,
+      "sparse": [
+        "skills"
+      ],
+      "skills": [
+        {
+          "name": "spring-testing-fundamentals",
+          "src": "skills/spring-testing-fundamentals"
+        },
+        {
+          "name": "spring-mvc-testing",
+          "src": "skills/spring-mvc-testing"
+        },
+        {
+          "name": "spring-webflux-testing",
+          "src": "skills/spring-webflux-testing"
+        },
+        {
+          "name": "spring-jpa-testing",
+          "src": "skills/spring-jpa-testing"
+        },
+        {
+          "name": "spring-security-testing",
+          "src": "skills/spring-security-testing"
+        },
+        {
+          "name": "spring-websocket-testing",
+          "src": "skills/spring-websocket-testing"
+        }
+      ]
+    },
+    {
+      "id": "flutter-skills",
+      "repo": "https://github.com/flutter/skills",
+      "ref": "main",
+      "commit": null,
+      "sparse": [
+        "skills"
+      ],
+      "note": "仓库里的 flutter-google-play-release、flutter-setup-firebase-crashlytics、flutter-use-fvm 是自建的,故意不登记,脚本不会碰。",
+      "skills": [
+        {
+          "name": "flutter-add-integration-test",
+          "src": "skills/flutter-add-integration-test"
+        },
+        {
+          "name": "flutter-add-widget-preview",
+          "src": "skills/flutter-add-widget-preview"
+        },
+        {
+          "name": "flutter-add-widget-test",
+          "src": "skills/flutter-add-widget-test"
+        },
+        {
+          "name": "flutter-apply-architecture-best-practices",
+          "src": "skills/flutter-apply-architecture-best-practices"
+        },
+        {
+          "name": "flutter-build-responsive-layout",
+          "src": "skills/flutter-build-responsive-layout"
+        },
+        {
+          "name": "flutter-fix-layout-issues",
+          "src": "skills/flutter-fix-layout-issues"
+        },
+        {
+          "name": "flutter-implement-json-serialization",
+          "src": "skills/flutter-implement-json-serialization"
+        },
+        {
+          "name": "flutter-setup-declarative-routing",
+          "src": "skills/flutter-setup-declarative-routing"
+        },
+        {
+          "name": "flutter-setup-localization",
+          "src": "skills/flutter-setup-localization"
+        },
+        {
+          "name": "flutter-use-http-package",
+          "src": "skills/flutter-use-http-package"
+        }
+      ]
+    },
+    {
+      "id": "codex-image",
+      "repo": "https://github.com/xntj-ai/codex-image",
+      "ref": "main",
+      "commit": "9b4e0bcfee402129921a84a250a2900c1408c500",
+      "skills": [
+        {
+          "name": "codex-image",
+          "src": ".",
+          "exclude": [
+            "README.md",
+            ".gitignore",
+            ".github/"
+          ],
+          "note": "上游仓库根目录本身就是 skill,同步时排除仓库级文件。"
+        }
+      ]
+    },
+    {
+      "id": "alicloud-skills",
+      "repo": "https://github.com/cinience/alicloud-skills",
+      "ref": "main",
+      "commit": "b22dc0abe54cd63c65af78bfdf71d4911eef6c1b",
+      "sparse": [
+        "skills/storage/oss/aliyun-oss-ossutil"
+      ],
+      "skills": [
+        {
+          "name": "aliyun-oss-ossutil",
+          "src": "skills/storage/oss/aliyun-oss-ossutil",
+          "extra": {
+            "LICENSE": "LICENSE"
+          },
+          "patch": "patches/aliyun-oss-ossutil.patch",
+          "note": "上游按 storage/oss/ 分层存放,这里拍平;patch 重打两处写死的旧路径。"
+        }
+      ]
+    },
+    {
+      "id": "patrol",
+      "repo": "https://github.com/leancodepl/patrol",
+      "ref": "master",
+      "commit": "cf2a783aa90ea1b9dda7ce8d2fc8af17782fdf3d",
+      "sparse": [
+        "skills"
+      ],
+      "note": "上游是 Patrol 产品主仓,不是 skill 仓库,靠 sparse checkout 只取 skills/;主分支是 master。",
+      "skills": [
+        {
+          "name": "patrol-setup",
+          "src": "skills/patrol-setup"
+        },
+        {
+          "name": "patrol-write-test",
+          "src": "skills/patrol-write-test"
+        },
+        {
+          "name": "patrol-test-architecture",
+          "src": "skills/patrol-test-architecture"
+        }
+      ]
+    }
+  ]
+}
