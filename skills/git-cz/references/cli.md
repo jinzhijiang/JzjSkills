@@ -59,8 +59,8 @@ git-cz --non-interactive --type=feat --scope=auth --subject="新增短信登录"
   --breaking="移除了 loginWithCode 旧接口" --issues="#42"
 ```
 
-产出(格式与段落布局已实测;emoji 随配置的 `types` / `breakingChangePrefix` 变,
-下面是装了本 skill 的 `changelog.config.js` 之后的样子):
+产出(已实测,逐字节——git-cz 4.9.0 + 本 skill 的 `changelog.config.js`;
+换配置则 emoji 随 `types` / `breakingChangePrefix` 变):
 
 ```
 ✨ feat(auth): 新增短信登录
