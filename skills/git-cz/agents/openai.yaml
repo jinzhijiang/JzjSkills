@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git-cz Commit Style"
+  short_description: "按统一契约写 emoji + Conventional Commits 提交信息"
+  default_prompt: "Use $git-cz to write this commit message in the unified style, and validate it before committing."
