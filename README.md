@@ -29,6 +29,10 @@ JzjSkills/
 │   │   ├── agents/openai.yaml
 │   │   ├── references/                  # 审计、Console、Android 质量
 │   │   └── scripts/verify_flutter_play_release.py
+│   ├── countly-data-analysis/           # 自建：自建 Countly 的 Read API 查询与埋点对账
+│   │   ├── SKILL.md
+│   │   ├── config.example.env           # 凭据模板，按项目放到 ~/.config/ai-ignore-config/<项目名>/
+│   │   └── scripts/countly_query.sh     # bash + curl + python3
 │   ├── git-cz/                          # 自建：统一所有项目的提交信息风格
 │   │   ├── SKILL.md
 │   │   ├── agents/openai.yaml
@@ -110,6 +114,7 @@ description: 简短描述这个 skill 做什么
 | `patrol-write-test` | 同上 | [skills/patrol-write-test/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-write-test) | Apache-2.0 | 2026-08-04 | 原样引入，仅含 `SKILL.md`；此前已在 `~/.cc-switch/skills` 中（2026-07-17 装入），内容与上游一致，本次纳入仓库管理 |
 | `patrol-test-architecture` | 同上 | [skills/patrol-test-architecture/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-test-architecture) | Apache-2.0 | 2026-08-04 | 原样引入，仅含 `SKILL.md`；同上，此前已装入本机，本次纳入仓库管理 |
 | `aliyun-oss-ossutil` | [cinience/alicloud-skills](https://github.com/cinience/alicloud-skills) | [skills/storage/oss/aliyun-oss-ossutil/](https://github.com/cinience/alicloud-skills/tree/main/skills/storage/oss/aliyun-oss-ossutil) | MIT | 2026-08-04 | 引入上游 `b22dc0a`；上游按 `storage/oss/` 分层存放，这里拍平为 `skills/aliyun-oss-ossutil/`，因此改了两处写死的旧路径（`SKILL.md` 的校验命令、`scripts/check_ossutil.py` 改为按 `__file__` 自定位），其余原样；`LICENSE` 取自上游仓库根目录 |
+| `countly-data-analysis` | 自建 / 内部整理 | — | — | 2026-08-05 | 自建；原在 `flutter_todo/.agents/skills/`，因笔笔记账也接入 Countly 而收拢到这里并去项目化：凭据按 **git 根目录名**解析（`~/.config/ai-ignore-config/<项目名>/countly.env`），避免从 A 项目静默查到 B 项目的数据；`scripts/countly_query.sh` 提供 list / event / range / views / crash / summary |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-04 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`），并在 acquire 后自动亮屏解锁、release 时还原屏幕设置 |
 
 ## 更新已引入的 Skill
