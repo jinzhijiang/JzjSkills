@@ -1,6 +1,6 @@
 ---
 name: flutter-google-play-release
-description: Prepare, audit, create, update, and safely submit Flutter Android apps to Google Play. Use when Codex needs to plan a first Play launch or follow-up release; build, sign, or inspect an AAB; fill Play Console store listings, media, app-content declarations, Data safety, advertising ID, target audience, or IARC questionnaires; resolve target SDK, edge-to-edge, orientation, R8, AGP, or device-compatibility findings; save a release draft; or submit changes for review. Supports authenticated Play Console browser work while preserving explicit confirmation gates for irreversible app/pricing choices, legal terms, and final review or publication actions.
+description: Prepare, audit, document, create, update, and safely hand off Flutter Android releases to Google Play. Use when Codex needs to maintain canonical multilingual store descriptions and release notes; plan a first Play launch or follow-up release; build, sign, or inspect an AAB; fill Play Console listings, media, app-content declarations, Data safety, advertising ID, target audience, or IARC questionnaires; resolve Android release-quality findings; save a release draft; hand the final review submission to the user; or commit and tag the exact build after submission.
 ---
 
 # Release Flutter apps through Google Play
@@ -26,14 +26,37 @@ the app has been submitted, approved, or published.
    terms on the user's behalf.
 6. Always stop immediately before **Send for review**, **Submit changes for
    review**, **Start rollout**, **Publish**, or an equivalent final action.
-   Execute it only after a fresh, action-time confirmation.
+   The user performs this final action; do not click it on the user's behalf.
 7. Never read out, paste into chat, log, or store keystore passwords, service
    credentials, browser session data, or signing secrets.
 
-## 1. Establish the release contract
+## 1. Establish the release contract and canonical docs
 
 Read repository instructions first. For a substantial first launch, use the
 project's planning/task workflow when one exists.
+
+Before building, uploading, or editing Play Console, locate or create:
+
+```text
+docs/store/google-play-description.md
+docs/store/google-play-release-notes.md
+```
+
+Treat these as the source of truth:
+
+- `google-play-description.md`: title, short description, and full description
+  for every active Play locale;
+- `google-play-release-notes.md`: append-only sections keyed by version name and
+  versionCode, with notes for every active Play locale.
+
+Update them from shipped repository facts first, validate field lengths and
+privacy claims, then copy their content into Play Console. Do not reconstruct
+canonical copy from the Console after submission. If the repository already
+uses equivalent canonical files, preserve its names instead of creating
+duplicates.
+
+Read [references/release-document-contract.md](references/release-document-contract.md)
+when creating, migrating, or validating these files.
 
 Capture the following facts before changing Play Console:
 
@@ -105,15 +128,18 @@ Saving an app record is not submitting it for review.
 
 ## 4. Complete listing and media
 
-1. Fill the default locale first, then add approved localizations.
-2. Source title, short/full description, contact data, and URLs from committed
+1. Verify the canonical description document is current before changing the
+   Console.
+2. Fill the default locale first, then every locale present in the canonical
+   document.
+3. Source title, short/full description, contact data, and URLs from committed
    product materials or user-confirmed copy.
-3. Enter full `https://` URLs and verify public accessibility.
-4. Upload icon, feature graphic, phone screenshots, and each tablet group
+4. Enter full `https://` URLs and verify public accessibility.
+5. Upload icon, feature graphic, phone screenshots, and each tablet group
    independently. Wait until processing finishes before judging success.
-5. Inspect visible errors, preview/cropping, media counts, and disabled/enabled
+6. Inspect visible errors, preview/cropping, media counts, and disabled/enabled
    Save state after every group.
-6. Do not claim a locale is complete merely because it falls back to the
+7. Do not claim a locale is complete merely because it falls back to the
    default locale; report fallback explicitly.
 
 Verify current size/count limits in the live Console. Common historical values
@@ -149,7 +175,9 @@ for detailed form and browser failure shields.
 2. Upload the verified AAB and wait for Play processing to finish.
 3. Confirm Play displays the expected version, min API, target SDK, device
    support, permissions, and attached mapping/native symbols.
-4. Fill release notes for every approved locale.
+4. Fill release notes for every active locale from the canonical release-notes
+   document. Keep locale opening tag, content, and closing tag on separate lines
+   when using Play's combined editor.
 5. Save, preview, and classify findings:
    - **blocker/error**: must be resolved before review;
    - **warning/recommendation**: assess against product behavior and supported
@@ -160,7 +188,7 @@ for detailed form and browser failure shields.
    [references/android-release-quality.md](references/android-release-quality.md).
 7. Save the release into Publishing overview without sending it for review.
 
-## 7. Stop at the final confirmation gate
+## 7. Hand final submission to the user
 
 Present a compact final summary containing:
 
@@ -172,13 +200,37 @@ Present a compact final summary containing:
 - remaining blockers, warnings, and automatic-check status;
 - the exact final button/action that remains.
 
-Ask for a fresh explicit confirmation such as `确认提交审核`. Do not infer it
-from earlier requests such as “create,” “upload,” “continue,” or “publish the
-app.”
+Leave the authenticated Console on the final confirmation page and tell the
+user exactly which button remains. The user performs that click. Do not infer
+permission from “create,” “upload,” “continue,” “publish,” or any earlier
+confirmation.
 
-After confirmation, execute only the described final action, then record the
-Console status and time. Distinguish **submitted for review**, **in review**,
-**approved**, **ready to publish**, and **live**.
+After the user reports submission, read the Console status when available and
+distinguish **submitted for review**, **in review**, **approved**,
+**ready to publish**, and **live**.
+
+## 8. Commit and tag the submitted build
+
+Do not wait for approval or live publication. Once the user confirms that the
+exact build was submitted for review:
+
+1. Reconfirm the submitted version name and versionCode.
+2. Run repository-required validation and inspect the scoped diff.
+3. Commit only the release-related local changes, following the repository's
+   commit convention.
+4. Create an annotated tag:
+
+   ```text
+   v<versionName>(<versionCode>)
+   ```
+
+   Example: `v1.1.0(3)`.
+5. Verify the tag resolves to the release commit.
+6. Push the commit or tag only when explicitly requested.
+
+If review is rejected and a replacement AAB is needed, increment versionCode
+and create a new commit and tag such as `v1.1.0(4)`. Never move, delete, or
+reuse the tag for the previously submitted build.
 
 ## Failure shields
 
@@ -196,3 +248,5 @@ Console status and time. Distinguish **submitted for review**, **in review**,
   recommends a newer optimizer.
 - Never leave the user believing that a saved draft was submitted or that a
   submitted release is already published.
+- Never wait for the build to become live before creating its submission tag;
+  the tag identifies the immutable build sent to review.
