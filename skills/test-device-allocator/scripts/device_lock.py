@@ -27,7 +27,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-ALLOCATOR_VERSION = 1
+ALLOCATOR_VERSION = 2
 DEFAULT_TTL_HOURS = 8.0
 CMD_TIMEOUT = 15               # 单条外部命令默认超时(秒)
 AVD_NAME_TIMEOUT = 10
@@ -42,6 +42,8 @@ TOMB_MAX_AGE = 600             # .reclaim-* 墓碑残骸清理阈(秒)
 HDC_TIMEOUT = 20               # hdc list targets 等外部命令超时
 
 # 亮屏解锁:设备熄屏/锁屏时自动化点不动屏幕,acquire 完成后统一做一次(--no-wake 关闭)。
+# 默认只唤醒、不改设备常亮/超时设置:这样即使 agent 崩溃或漏 release,手机也会
+# 按用户原有设置自动锁屏。只有显式 --keep-awake 才临时改设置,release 时尽力还原。
 # 每一步都是尽力而为——失败只记日志,绝不让 acquire 失败。
 WAKE_CMD_TIMEOUT = 15
 RESTORE_TIMEOUT = 8            # release 时还原屏幕设置的短超时(设备可能已拔线)
@@ -867,8 +869,9 @@ def ios_physicals(warnings):
 # ---------- 亮屏解锁 ----------
 #
 # 设备熄屏 / 停在锁屏时,自动化测试点不动屏幕(截图全黑、tap 落空、flutter_driver
-# 找不到 widget)。acquire 拿到设备后统一走一次:唤醒 → 解锁 → 顺手把屏幕超时拉长,
-# 免得测到一半又睡过去;拉长的设置记进锁的 meta,release 时还原回去。
+# 找不到 widget)。acquire 拿到设备后统一走一次唤醒 → 解锁。默认不改屏幕超时,
+# 长时间构建/安装后应在 UI 交互前再调 wake;只有显式 --keep-awake 才改设置并记进
+# 锁的 meta,release 时还原。
 # 设了 PIN / 图案 / 密码的真机无法程序解锁(系统限制),此时只提示、不报错。
 
 
@@ -1013,8 +1016,8 @@ def wake_harmony(hdc, serial, keep_awake):
     return info
 
 
-def wake_device(platform_, kind, device_id, keep_awake=True):
-    """亮屏 + 解锁 + 防再次熄屏;返回可直接塞进结果 JSON 的 dict。"""
+def wake_device(platform_, kind, device_id, keep_awake=False):
+    """亮屏 + 解锁;可选临时常亮,返回可直接塞进结果 JSON 的 dict。"""
     if not device_id:
         return {"attempted": False, "reason": "no_device_id"}
     if platform_ == "android":
@@ -1028,8 +1031,7 @@ def wake_device(platform_, kind, device_id, keep_awake=True):
     if kind == "simulator":     # iOS 模拟器不会熄屏,也没有锁屏
         return {"attempted": False, "reason": "ios_simulator_no_lockscreen"}
     return {"attempted": False, "reason": "ios_physical_manual_unlock",
-            "notes": ["iOS 真机无法程序解锁:请手动解锁,并把「设置 → 显示与亮度 → "
-                      "自动锁定」设为「永不」"]}
+            "notes": ["iOS 真机无法程序解锁:请在 UI 测试前手动解锁"]}
 
 
 def safe_wake(platform_, kind, device_id, keep_awake):
@@ -1467,7 +1469,7 @@ def finish_acquire(c, owner, project, created, booted, reused, args, warnings):
         screen = {"attempted": False, "reason": "disabled_by_--no-wake"}
     else:
         screen = safe_wake(c["platform"], c["kind"], c.get("device_id"),
-                           not args.no_keep_awake)
+                           args.keep_awake)
         record_screen_restore(c["key"], screen)
     result = build_result(c, owner, project, created, booted, reused)
     result["screen"] = screen
@@ -1756,10 +1758,16 @@ def cmd_wake(args):
             fail(EXIT_NO_DEVICE, "NO_DEVICE", "本会话没有持有任何设备锁",
                  hint="先 acquire;或用 --device <id> 指定要点亮的设备")
 
+    # 无锁设备可以做一次性唤醒,但不能开常亮:没有 meta 存原值,
+    # 之后 release 也找不到它,会重现“agent 结束后手机永久常亮”。
+    if args.keep_awake and any(not m.get("device_key") for m in targets):
+        fail(EXIT_ARGS, "ARGS", "--keep-awake 只能用于已持锁的设备",
+             hint="先 acquire,再用返回的 device_key 执行 wake --key <key> --keep-awake")
+
     results = []
     for m in targets:
         screen = safe_wake(m.get("platform"), m.get("kind"), m.get("device_id"),
-                           not args.no_keep_awake)
+                           args.keep_awake)
         record_screen_restore(m.get("device_key"), screen)
         results.append({"device_key": m.get("device_key"), "platform": m.get("platform"),
                         "device_id": m.get("device_id"), "name": m.get("name"),
@@ -1916,8 +1924,13 @@ def main():
                         "环境变量 AI_DEVICE_EMULATOR_MEMORY 亦可设定;iOS 模拟器不支持")
     a.add_argument("--no-wake", action="store_true",
                    help="不做亮屏解锁(默认会唤醒并尝试解锁分配到的设备)")
-    a.add_argument("--no-keep-awake", action="store_true",
-                   help="亮屏但不修改屏幕超时/常亮设置(默认会拉长,release 时还原)")
+    ak = a.add_mutually_exclusive_group()
+    ak.add_argument("--keep-awake", action="store_true",
+                    help="显式在持锁期间临时常亮(默认不改设备设置;"
+                         "长时间无人值守测试才用,release 时尽力还原)")
+    ak.add_argument("--no-keep-awake", dest="keep_awake", action="store_false",
+                    help=argparse.SUPPRESS)  # v1 兼容:新默认已是不常亮
+    a.set_defaults(keep_awake=False)
 
     w = sub.add_parser("wake", help="把设备重新亮屏解锁(测试中途熄屏时用)")
     wg = w.add_mutually_exclusive_group()
@@ -1926,8 +1939,13 @@ def main():
     wg.add_argument("--all-mine", action="store_true", help="本 owner 持有的全部设备")
     w.add_argument("--owner", type=int, help="锁持有者 pid(默认取会话进程)")
     w.add_argument("--project", help="项目路径(默认当前目录,用于定位本会话的锁)")
-    w.add_argument("--no-keep-awake", action="store_true",
-                   help="只亮屏解锁,不修改屏幕超时/常亮设置")
+    wk = w.add_mutually_exclusive_group()
+    wk.add_argument("--keep-awake", action="store_true",
+                    help="显式在持锁期间临时常亮(默认只唤醒解锁;"
+                         "无锁设备不允许)")
+    wk.add_argument("--no-keep-awake", dest="keep_awake", action="store_false",
+                    help=argparse.SUPPRESS)  # v1 兼容
+    w.set_defaults(keep_awake=False)
 
     r = sub.add_parser("release", help="释放锁(幂等,恒 exit 0)")
     g = r.add_mutually_exclusive_group(required=True)

@@ -1,6 +1,6 @@
 ---
 name: test-device-allocator
-description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任何要把 Flutter / Android / iOS / HarmonyOS app 跑到真机或模拟器上做自动化测试、UI 探查、E2E 验证之前,先运行本 skill 的 scripts/device_lock.py acquire 领取一台空闲设备(优先空闲真机,其次已在运行的空闲模拟器,再启动已停止的模拟器,最后自动新建),拿到 JSON 里的 device id 后显式传给 flutter run -d / flutter drive -d / adb -s / hdc -t,测试完 release 释放。Flutter 项目未说明用什么平台、也没有开发平台特有功能时,默认用 Android 测试(acquire 默认即 android);Flutter 项目带鸿蒙模块(ohos/)且本次功能不是鸿蒙特有、能跑在鸿蒙设备上时,可以放开到 --platform android,harmony 把已连接的鸿蒙真机/已启动的鸿蒙模拟器也纳入分配池。acquire 后会自动亮屏解锁设备并拉长屏幕超时(release 时还原),测试中途熄屏可随时 wake 子命令再点亮,免得截图全黑、点击落空。启动/新建模拟器前会按宿主内存自动限流,内存不足时报 MEMORY_PRESSURE 并建议改用真机,避免并发模拟器把整机拖进 swap 卡死;Android 还可用 --memory <MB> 限定单台模拟器的 guest RAM,压小内存即可多跑一台(iOS 模拟器不是 VM,无此旋钮)。触发词:设备分配、分配模拟器、锁定设备、设备被占用、多项目同时测试、并发测试、抢设备、emulator、simulator、AVD、adb devices、xcrun simctl、hdc list targets、鸿蒙设备测试、ohos、模拟器互相污染、模拟器卡死、内存不足、限制模拟器内存、hw.ramSize、设备熄屏、锁屏、亮屏解锁、屏幕黑屏点不动。不适用于:单元测试与 Widget 测试(flutter test,不需要设备)、启动/新建鸿蒙模拟器(用 deveco-studio-emulator,本 skill 只分配已连上的鸿蒙目标)、用户手动开发调试自行选设备的场景。
+description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、iOS 和 HarmonyOS 真机或模拟器。任务要执行 Flutter run/drive、安装 app、UI 探查、截图点击或 E2E 验证时使用：先用 device_lock.py acquire 领设备，再把 device_id 显式传给每条 flutter -d、adb -s 或 hdc -t 命令，最后 release。支持优先空闲真机、复用或新建模拟器、多平台组合、宿主内存限流和 Android 模拟器 RAM 限制。acquire 默认只亮屏解锁，不改常亮或屏幕超时；构建安装后可再用 wake，长时间无人值守才显式用 --keep-awake。也用于排查设备被占用、模拟器互相污染或卡死、内存不足、设备熄屏、屏幕黑屏点不动、测试后一直亮屏或不会自动锁屏。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器或用户手动调试自行选设备。
 ---
 
 # 并发测试设备分配(device_lock)
@@ -52,9 +52,9 @@ description: 多项目并发 AI 自动化测试的设备分配与互斥锁。任
 
 | 子命令 | 用途 | 常用参数 |
 |---|---|---|
-| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--no-keep-awake` 不改屏幕超时 |
-| `wake` | 把设备重新亮屏解锁(测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`、`--no-keep-awake` |
-| `release` | 释放锁(幂等,恒 exit 0),顺带还原屏幕超时设置 | `--key <device_key>` / `--device <id>` / `--all-mine` |
+| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--keep-awake` 显式临时常亮 |
+| `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;长时间无人值守才传 `--keep-awake` |
+| `release` | 释放锁(幂等,恒 exit 0);如显式开过常亮则尽力还原 | `--key <device_key>` / `--device <id>` / `--all-mine` |
 | `status` | 设备 × 锁全景(排查谁占了什么) | 无 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
 
@@ -73,14 +73,14 @@ OUT=$(python3 "$SKILL_DIR/scripts/device_lock.py" acquire --owner $PPID --projec
 DEVICE_ID=$(echo "$OUT"  | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_id"])')
 DEVICE_KEY=$(echo "$OUT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_key"])')
 
-# 2. 显式指定设备跑测试(全链路都带 -d / -s / -t)
+# 2. 显式指定设备构建、安装、运行(全链路都带 -d / -s / -t)
 flutter run -d "$DEVICE_ID"                     # 或 flutter_skill launch -d "$DEVICE_ID"
 # … flutter_skill inspect / act …,或:
 # flutter drive --driver=test_driver/integration_test.dart --target=integration_test/app_test.dart -d "$DEVICE_ID"
 # Android 原生项目:adb -s "$DEVICE_ID" install app.apk 等
 # 鸿蒙:hdc -t "$DEVICE_ID" install entry-default.hap 等
 
-# 3. 中途发现截图全黑 / 点击没反应 → 多半熄屏了,再点亮一次(不用重新 acquire)
+# 3. 构建/安装完成后、开始截图或点击前再点亮一次(不用重新 acquire)
 python3 "$SKILL_DIR/scripts/device_lock.py" wake --key "$DEVICE_KEY"
 
 # 4. 测完释放(失败也要释放)
@@ -90,21 +90,22 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 - acquire 失败时 exit code 非 0,stdout JSON 带 `error/message/hint`:`NO_SYSTEM_IMAGE`(4)→ 按 hint 跑 sdkmanager 装镜像后重试;`BUSY`(7)→ 指定的设备被占,去掉 `--device` 让脚本另挑;`MEMORY_PRESSURE`(9)→ 宿主内存不够再开一台模拟器,优先真机/已运行设备或按 hint 释放内存。
 - fvm 项目按 flutter-use-fvm 规则把 `flutter` 换成 `fvm flutter`;`device_lock.py` 本身不经 fvm。
 
-## 亮屏解锁(acquire 自动做)
+## 亮屏解锁(默认无持久副作用)
 
-设备熄屏或停在锁屏时,自动化根本点不动:截图全黑、tap 落空、driver 找不到 widget。所以 acquire 拿到设备后会自动走一遍**唤醒 → 解锁 → 拉长屏幕超时**,结果放在返回 JSON 的 `screen` 字段(`state` / `locked` / `actions` / `notes`)。
+设备熄屏或停在锁屏时,自动化根本点不动:截图全黑、tap 落空、driver 找不到 widget。acquire 拿到设备后会自动做一次**唤醒 → 解锁**,结果放在返回 JSON 的 `screen` 字段(`state` / `locked` / `actions` / `notes`)。**默认不改设备的常亮或屏幕超时设置**,所以 agent 即使漏掉 release,手机也会按用户原有设置自动锁屏。
 
-| 平台 | 唤醒 | 解锁 | 防再次熄屏(release 时还原) |
+| 平台 | 唤醒 | 解锁 | 只有显式 `--keep-awake` 才做(release 时尽力还原) |
 |---|---|---|---|
 | Android | `input keyevent KEYCODE_WAKEUP` | `wm dismiss-keyguard` | `svc power stayon true` |
 | HarmonyOS | `power-shell wakeup` | 锁屏窗口还在就 `uinput` 上滑(分辨率从 hidumper 读) | `power-shell timeout -o 1800000` |
 | iOS 模拟器 | 不需要(不会熄屏,也没锁屏) | — | — |
-| iOS 真机 | 无法程序控制 | 无法程序解锁 | 手动把「自动锁定」设为「永不」 |
+| iOS 真机 | 无法程序控制 | 无法程序解锁 | 不支持;在 UI 测试前手动解锁 |
 
 - **全程尽力而为**:任何一步失败都只记 stderr 日志,不会让 acquire 失败。
 - 设了 **PIN / 图案 / 密码**的真机系统不允许程序解锁,`screen.locked` 会是 `true` 并给出提示,此时需要人手解一次。
-- 改过的屏幕超时/常亮设置记在锁的 meta 里,`release`(以及回收陈旧锁、`clean`)时自动还原;重复 `wake` 不会覆盖最初记下的原值。
-- 不想动设备:acquire 传 `--no-wake`(完全不碰)或 `--no-keep-awake`(只亮屏解锁,不改设置)。
+- 构建/安装可能长于用户的锁屏超时;完成后、真正开始 UI 交互前调一次 `wake --key "$DEVICE_KEY"`。交互中的点击会继续刷新系统计时。
+- 只有长时间无人值守、期间又可能没有输入事件的测试才传 `--keep-awake`;改过的原值记在锁 meta 里,`release` / 陈旧锁回收 / `clean` 时尽力还原。`wake --device` 找不到对应锁时会拒绝 `--keep-awake`,避免无处记录原值。
+- 完全不想碰屏幕时传 `--no-wake`。旧版 `--no-keep-awake` 保留为兼容参数,新默认本来就不会常亮。
 
 ## 分配策略与锁语义
 
@@ -131,7 +132,8 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | exit 9 `MEMORY_PRESSURE` | 已有模拟器在跑、宿主内存不够再开一台(0 台在跑时不会出现此错)。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)后重试;Android 可 `--memory 1024` 压小单台换配额;确认有余量可 `--mem-override` 或调 `--max-emulators` |
 | 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
-| 截图全黑 / 点击没反应 / driver 找不到 widget | 多半熄屏或停在锁屏:跑 `wake --key $DEVICE_KEY` 再点亮;`screen.locked=true` 说明设了 PIN,需人工解一次 |
+| 截图全黑 / 点击没反应 / driver 找不到 widget | 默认保留系统自动锁屏;构建/安装后或测试中途跑 `wake --key $DEVICE_KEY` 再点亮;`screen.locked=true` 说明设了 PIN,需人工解一次 |
+| 测试后手机一直亮屏 / 不会自动锁屏 | 新版默认不再修改常亮设置;Android 可用 `adb -s <id> shell settings get global stay_on_while_plugged_in` 查看,`7` 通常表示充电时全部常亮。确认是测试遗留后用 `settings put global stay_on_while_plugged_in 0` 恢复;不要在不知道原值时自动批量重置用户设备 |
 | 鸿蒙设备不参与分配 | 只有 `hdc list targets -v` 里 **Connected** 的目标才算;还要显式 `--platform harmony` 或 `android,harmony`(`any` 不含鸿蒙) |
 | exit 6 `ENV_MISSING` 且提到 hdc | 没装 DevEco Studio,或 hdc 不在常见位置:设 `HDC_PATH` 指向 hdc 可执行文件 |
 | 忘了 release / 会话崩了 | 下次任意 acquire 起手全局回收死 pid / 超 TTL 的锁;不放心跑 `clean` |

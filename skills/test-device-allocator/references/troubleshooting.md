@@ -43,25 +43,36 @@ export HDC_PATH=/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony
 
 **处置**:
 
-1. acquire 默认已经做了唤醒 + 解锁 + 拉长屏幕超时,先看返回 JSON 的 `screen` 字段确认做没做成:`state` 应为 `awake`、`locked` 应为 `false`。
-2. 测试中途又睡过去 → `python3 <skill根>/scripts/device_lock.py wake --key <device_key>` 再点一次,不用重新 acquire。
-3. `screen.locked` 是 `true` → 设备设了 PIN / 图案 / 密码,系统不允许程序解锁,需要人工解一次(之后 `stayon` / 屏幕超时覆盖会让它别再锁上)。
-4. `screen.attempted` 是 `false`:`reason` 会说明原因——`disabled_by_--no-wake`(自己关掉的)、`ios_simulator_no_lockscreen`(不需要)、`ios_physical_manual_unlock`(iOS 真机只能手动解锁,并把「设置 → 显示与亮度 → 自动锁定」设为「永不」)、`adb_missing` / `hdc_missing`(工具链没找到)。
+1. acquire 默认做一次唤醒 + 解锁,但不修改用户的自动锁屏设置。先看返回 JSON 的 `screen` 字段:`state` 应为 `awake`、`locked` 应为 `false`。
+2. 构建/安装可能已经超过屏幕超时;开始截图/点击前,以及测试中途又睡过去时,运行 `python3 <skill根>/scripts/device_lock.py wake --key <device_key>` 再点一次,不用重新 acquire。
+3. `screen.locked` 是 `true` → 设备设了 PIN / 图案 / 密码,系统不允许程序解锁,需要人工解一次。
+4. `screen.attempted` 是 `false`:`reason` 会说明原因——`disabled_by_--no-wake`(自己关掉的)、`ios_simulator_no_lockscreen`(不需要)、`ios_physical_manual_unlock`(iOS 真机只能在 UI 测试前手动解锁)、`adb_missing` / `hdc_missing`(工具链没找到)。
 5. 手动等价命令:
 
 ```bash
 # Android
 adb -s <id> shell input keyevent KEYCODE_WAKEUP
 adb -s <id> shell wm dismiss-keyguard
-adb -s <id> shell svc power stayon true          # 还原:settings put global stay_on_while_plugged_in 0
+# 只有确实需要无人值守长测试时才使用(必须记住原值并还原)
+adb -s <id> shell svc power stayon true
 
 # HarmonyOS
 hdc -t <id> shell power-shell wakeup
 hdc -t <id> shell uinput -T -m 540 1870 540 580 300    # 上滑解锁,坐标按分辨率折算
-hdc -t <id> shell power-shell timeout -o 1800000       # 还原:power-shell timeout -r
+hdc -t <id> shell power-shell timeout -o 1800000       # 只用于显式长测试
 ```
 
-6. 改过的设置记在锁的 meta(`screen_restore`)里,`release` / 回收陈旧锁 / `clean` 时自动还原;完全不想动设备就 acquire 传 `--no-wake`。
+6. 默认不改任何持久屏幕设置。只有显式 `--keep-awake` 才把原值记在锁的 meta(`screen_restore`)里,`release` / 回收陈旧锁 / `clean` 时尽力还原;完全不想动设备就 acquire 传 `--no-wake`。
+
+## 测试后手机一直亮屏
+
+Android 先查 `adb -s <id> shell settings get global stay_on_while_plugged_in`。`7` 通常是 `svc power stayon true` 开启了 USB / AC / 无线充电全常亮;`dumpsys power` 里同时会看到 `mStayOn=true`。确认这是测试遗留、而非用户自己的开发者选项后,再执行:
+
+```bash
+adb -s <id> shell settings put global stay_on_while_plugged_in 0
+```
+
+不要在没有原值或用户确认时对所有设备自动批量重置。新版默认不再设置常亮,因此漏 release 也不会再造成这个问题。
 
 ## 手动清理
 

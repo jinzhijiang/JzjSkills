@@ -1,4 +1,4 @@
 interface:
   display_name: "Test Device Allocator"
   short_description: "并发测试前分配并锁定空闲真机/模拟器"
-  default_prompt: "Use $test-device-allocator to acquire a free device before running app tests on a device, and release it after."
+  default_prompt: "Use $test-device-allocator to acquire a free device, wake it again immediately before UI interaction, explicitly target it in every command, and release it in a finally-style cleanup."

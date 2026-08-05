@@ -23,7 +23,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ## meta.json 字段
 
-`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(为防熄屏改过的设备设置原值,release 时还原;没改过为 null)。
+`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(只在显式 `--keep-awake` 时记录设备设置原值,release 时还原;默认为 null)。
 
 ## 陈旧(stale)判定
 
@@ -50,7 +50,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `--memory <MB>` | 用 AVD 自带 `hw.ramSize` | Android 模拟器 guest RAM,512-8192,越界 exit 2;同时收窄内存闸门的每台开销估算(环境变量 `AI_DEVICE_EMULATOR_MEMORY` 亦可设定,`--memory` 优先) |
 | `--mem-override` | 关 | 跳过内存闸门(等效环境变量 `AI_DEVICE_MEM_OVERRIDE=1`) |
 | `--no-wake` | 关 | 不做亮屏解锁(默认会唤醒并尝试解锁分配到的设备) |
-| `--no-keep-awake` | 关 | 亮屏解锁但不修改屏幕超时 / 常亮设置 |
+| `--keep-awake` | 关 | 长时间无人值守测试时,显式在持锁期间临时常亮;release 时尽力还原。默认只唤醒解锁,不改设备设置 |
 
 分配优先级(tier 间严格有序,tier 内先按 `--platform` 所列平台顺序、再按各平台的确定性排序):
 
@@ -112,8 +112,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
   "screen": {
     "platform": "android", "attempted": true,
     "state_before": "asleep", "state": "awake", "locked": false,
-    "actions": ["input keyevent KEYCODE_WAKEUP", "wm dismiss-keyguard", "svc power stayon true"],
-    "notes": [], "restore": {"type": "android_stayon", "prev": "0"}
+    "actions": ["input keyevent KEYCODE_WAKEUP", "wm dismiss-keyguard"],
+    "notes": []
   }
 }
 ```
@@ -124,9 +124,9 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ### 亮屏解锁(acquire 收尾自动执行)
 
-熄屏 / 锁屏的设备上自动化点不动(截图全黑、tap 落空)。acquire 在设备就绪后统一走一遍唤醒 → 解锁 → 拉长屏幕超时,结果放进 `screen`:
+熄屏 / 锁屏的设备上自动化点不动(截图全黑、tap 落空)。acquire 在设备就绪后统一走一遍唤醒 → 解锁,结果放进 `screen`。默认不修改常亮/屏幕超时设置;只有显式 `--keep-awake` 才执行表中最后一列:
 
-| 平台 | 唤醒 | 状态判定 | 解锁 | 防熄屏(记 `restore`) |
+| 平台 | 唤醒 | 状态判定 | 解锁 | 显式 `--keep-awake`(记 `restore`) |
 |---|---|---|---|---|
 | Android | `input keyevent KEYCODE_WAKEUP`(只唤醒,不会像 KEYCODE_POWER 那样按灭) | `dumpsys power` 的 `mWakefulness=`;`dumpsys window` 的 `isKeyguardShowing` / `mDreamingLockscreen` / `mShowingLockscreen`(设备侧 grep,不回传整份 dump) | `wm dismiss-keyguard` | 先读 `settings get global stay_on_while_plugged_in` 存原值,再 `svc power stayon true` |
 | HarmonyOS | `power-shell wakeup` | `hidumper -s PowerManagerService -a -s` 的 `Current State:`;锁屏看 `hidumper -s WindowManagerService -a -a` 可见段里有没有 `SCBScreenLock*` | 可见段仍有锁屏窗口 → `uinput -T -m` 上滑(坐标按 dump 里最大窗口 rect 推算,读不到用 1080×2340 兜底) | `power-shell timeout -o 1800000`,原 `OverrideTimeout` 存进 restore |
@@ -135,18 +135,21 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 - `screen.locked`:`true`=仍锁着(多半有 PIN/图案/密码,系统禁止程序解锁,notes 会写明)、`false`=已解锁、`null`=判不出。
 - **全程 fail-soft**:每一步失败只写 stderr,`safe_wake` 兜住所有异常,acquire 不会因亮屏失败而失败。
-- `restore` 会写进锁的 meta(`screen_restore`),且**只记第一次**——否则重复 `wake` 会把「原值」覆盖成我们自己设的常亮值,release 就还原不回去了。
-- `--no-wake` 完全不碰设备;`--no-keep-awake` 只亮屏解锁、不改任何设置(此时无 `restore`)。
+- 默认无 `restore`:即使 agent 崩溃或漏掉 release,设备也会按用户原有超时自动锁屏。构建/安装后、开始 UI 交互前再调一次 `wake`。
+- 显式 `--keep-awake` 时,`restore` 会写进锁的 meta(`screen_restore`),且**只记第一次**——否则重复 `wake` 会把「原值」覆盖成我们自己设的常亮值,release 就还原不回去了。
+- `--no-wake` 完全不碰设备。旧版 `--no-keep-awake` 仍可接受,但新默认已是不常亮。
 
 ## wake
 
-`python3 device_lock.py wake [--key <k> | --device <id> | --all-mine] [--owner <pid>] [--project <path>] [--no-keep-awake]`
+`python3 device_lock.py wake [--key <k> | --device <id> | --all-mine] [--owner <pid>] [--project <path>] [--keep-awake]`
 
-测试中途设备又熄屏时重新点亮,不必重新 acquire。目标选择:
+构建/安装后或测试中途设备熄屏时重新点亮,不必重新 acquire。默认仍不改常亮设置。目标选择:
 
 - 不带选择参数 → 本会话(owner+project)持有的那台;
 - `--key` → 指定锁;`--all-mine` → 该 owner 持有的全部;
 - `--device <id>` → 先在锁记录里找,找不到就从当前连着的设备反查平台(adb → hdc → iOS 模拟器),都没有则 exit 3。
+
+`--keep-awake` 要把原值写入锁 meta,因此只允许用于已持锁设备。`wake --device` 找不到对应锁时仍可以普通唤醒,但与 `--keep-awake` 同用会 exit 2 `ARGS`;先 acquire 再用 `wake --key <key> --keep-awake`。
 
 输出:`{"ok": true, "action": "wake", "results": [{"device_key", "platform", "device_id", "name", "screen": {…}}]}`。`screen` 结构同 acquire。
 
@@ -154,7 +157,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 `--key <device_key>` / `--device <id或名>` / `--all-mine [--owner <pid>]` 三选一。幂等,恒 exit 0。
 输出:`{"ok": true, "action": "release", "released": [...], "not_found": [...]}`。
-**只还锁,不关模拟器**(留给下个会话热复用);但会按 meta 里的 `screen_restore` 把防熄屏改过的设备设置还原回去(短超时、尽力而为,设备已拔线就跳过)。回收陈旧锁(acquire 起手的清扫、`clean`)时同样会还原——会话崩了也不会把人家手机永久留在常亮。
+**只还锁,不关模拟器**(留给下个会话热复用)。默认没有改过屏幕设置;如果显式用了 `--keep-awake`,release 会按 meta 里的 `screen_restore` 还原(短超时、尽力而为,设备已拔线就跳过)。回收陈旧锁(acquire 起手的清扫、`clean`)时同样会还原。
 
 ## status
 
