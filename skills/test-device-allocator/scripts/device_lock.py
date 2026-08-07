@@ -27,7 +27,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-ALLOCATOR_VERSION = 2
+ALLOCATOR_VERSION = 3          # 3: screen_restore 由单个 dict 改为 dict 列表(读取向下兼容)
 DEFAULT_TTL_HOURS = 8.0
 CMD_TIMEOUT = 15               # 单条外部命令默认超时(秒)
 AVD_NAME_TIMEOUT = 10
@@ -42,12 +42,17 @@ TOMB_MAX_AGE = 600             # .reclaim-* 墓碑残骸清理阈(秒)
 HDC_TIMEOUT = 20               # hdc list targets 等外部命令超时
 
 # 亮屏解锁:设备熄屏/锁屏时自动化点不动屏幕,acquire 完成后统一做一次(--no-wake 关闭)。
-# 默认只唤醒、不改设备常亮/超时设置:这样即使 agent 崩溃或漏 release,手机也会
-# 按用户原有设置自动锁屏。只有显式 --keep-awake 才临时改设置,release 时尽力还原。
+# 真机额外把自动锁屏时长临时放宽到 SCREEN_OFF_DEFAULT_MIN 分钟(--screen-timeout 调整
+# / 0 关闭):默认 1 分钟的手机在构建、pub get、drive 启动这些空档里反复熄屏落锁,
+# 每次都要重新唤醒解锁。放宽的原值记进锁的 screen_restore,release / 回收陈旧锁时还原,
+# 并顺手熄屏落锁——设备不会因为测过一轮就一直亮着或停在解锁态。
+# 常亮(--keep-awake)是另一回事:那是彻底不熄屏,只在长时间无人值守时显式开。
 # 每一步都是尽力而为——失败只记日志,绝不让 acquire 失败。
 WAKE_CMD_TIMEOUT = 15
 RESTORE_TIMEOUT = 8            # release 时还原屏幕设置的短超时(设备可能已拔线)
 KEEP_AWAKE_MS = 1800000        # HarmonyOS 屏幕超时覆盖值(30 分钟)
+SCREEN_OFF_DEFAULT_MIN = 10    # 持锁期间真机的自动锁屏时长(分钟)
+SCREEN_OFF_FALLBACK_MS = 60000  # 读不到原值时,release 兜底还原成 1 分钟
 HARMONY_LOCK_WINDOW = "SCBScreenLock"   # hidumper WMS 里的锁屏窗口名前缀
 HARMONY_DEFAULT_SCREEN = (1080, 2340)   # 读不到分辨率时的上滑兜底坐标基准
 
@@ -562,8 +567,8 @@ def reclaim_path(path):
     return True
 
 
-def release_lock(key):
-    """还锁,并把 acquire 为「防熄屏」改过的设备设置还原回去(尽力而为)。"""
+def release_lock(key, lock_screen_after=True):
+    """还锁 → 还原改过的屏幕设置 → 真机熄屏落锁(后两步尽力而为,失败不影响还锁)。"""
     d = lock_dir(key)
     if not os.path.isdir(d):
         return False
@@ -571,7 +576,9 @@ def release_lock(key):
     if not reclaim_path(d):
         return False
     if restore_screen(meta):
-        log(f"{key}: 已还原屏幕超时设置")
+        log(f"{key}: 已还原屏幕设置(自动锁屏时长)")
+    if lock_screen_after and lock_screen(meta):
+        log(f"{key}: 已熄屏落锁")
     return True
 
 
@@ -636,7 +643,8 @@ def sweep_stale_locks():
         state, reason = eval_lock(path, meta)
         if state == "STALE" and reclaim_path(path):
             removed.append(f"{(meta or {}).get('device_key', dirname)}({reason})")
-            restore_screen(meta)   # 会话崩了也别把人家手机永久设成常亮
+            restore_screen(meta)   # 会话崩了也别把人家手机永久留在放宽/常亮状态
+            lock_screen(meta)
     if removed:
         log(f"回收陈旧锁: {', '.join(removed)}")
 
@@ -869,9 +877,9 @@ def ios_physicals(warnings):
 # ---------- 亮屏解锁 ----------
 #
 # 设备熄屏 / 停在锁屏时,自动化测试点不动屏幕(截图全黑、tap 落空、flutter_driver
-# 找不到 widget)。acquire 拿到设备后统一走一次唤醒 → 解锁。默认不改屏幕超时,
-# 长时间构建/安装后应在 UI 交互前再调 wake;只有显式 --keep-awake 才改设置并记进
-# 锁的 meta,release 时还原。
+# 找不到 widget)。acquire 拿到设备后统一走一次唤醒 → 解锁 → 真机放宽自动锁屏时长。
+# 改过的设备设置都记进锁的 meta(screen_restore,按 type 只记第一次的原值),
+# release / 回收陈旧锁时还原。长时间构建后仍可再调 wake 补一次唤醒。
 # 设了 PIN / 图案 / 密码的真机无法程序解锁(系统限制),此时只提示、不报错。
 
 
@@ -906,7 +914,26 @@ def android_setting(adb, serial, ns, key):
     return v if rc == 0 and v.isdigit() else None
 
 
-def wake_android(adb, serial, keep_awake):
+def add_restore(info, entry):
+    """登记一条「release 要还原的设备设置」,由 record_screen_restore 落到锁的 meta。"""
+    info.setdefault("restore", []).append(entry)
+
+
+def set_android_screen_off(adb, serial, ms, info):
+    """把自动锁屏时长临时放宽到 ms;原值进 restore,读不到则记 None(还原走兜底值)。"""
+    prev = android_setting(adb, serial, "system", "screen_off_timeout")
+    if prev == str(ms):
+        return                       # 已经是目标值(多半是本会话前一次 wake 设的),别把它当原值记下来
+    rc, _, _ = run([adb, "-s", serial, "shell", "settings", "put", "system",
+                    "screen_off_timeout", str(ms)], timeout=WAKE_CMD_TIMEOUT)
+    if rc != 0:
+        info["notes"].append("改不动 screen_off_timeout,测试中途可能仍会熄屏(可再调 wake)")
+        return
+    info["actions"].append(f"screen_off_timeout={ms}ms")
+    add_restore(info, {"type": "android_screen_off_timeout", "prev": prev})
+
+
+def wake_android(adb, serial, keep_awake, screen_off_ms=None):
     info = {"platform": "android", "attempted": True, "actions": [], "notes": []}
     state = android_power_state(adb, serial)
     info["state_before"] = state
@@ -926,27 +953,29 @@ def wake_android(adb, serial, keep_awake):
             info["notes"].append("keyguard 仍在(多半设了 PIN/图案/密码,系统不允许程序解锁),"
                                  "请手动解锁后重试")
     info["locked"] = locked
+    if screen_off_ms:
+        set_android_screen_off(adb, serial, screen_off_ms, info)
     if keep_awake:
+        # stayon 只在充电时生效,和 screen_off_timeout 是两个独立开关,可同时设
         prev = android_setting(adb, serial, "global", "stay_on_while_plugged_in")
         rc, _, _ = run([adb, "-s", serial, "shell", "svc", "power", "stayon", "true"],
                        timeout=WAKE_CMD_TIMEOUT)
         if rc == 0:
             info["actions"].append("svc power stayon true")
             if prev is not None:
-                info["restore"] = {"type": "android_stayon", "prev": prev}
+                add_restore(info, {"type": "android_stayon", "prev": prev})
     info["state"] = android_power_state(adb, serial)
     return info
 
 
 def harmony_power(hdc, serial):
-    """(电源状态, 当前 OverrideTimeout 毫秒);读不到的项为 None。"""
+    """电源状态(awake / sleep / inactive …);读不到返回 None。"""
     rc, out, _ = run([hdc, "-t", serial, "shell", "hidumper", "-s",
                       "PowerManagerService", "-a", "-s"], timeout=WAKE_CMD_TIMEOUT)
     if rc != 0:
-        return None, None
+        return None
     m = re.search(r"Current State:\s*(\w+)", out or "")
-    o = re.search(r"OverrideTimeout=(\d+)ms", out or "")
-    return (m.group(1).lower() if m else None), (int(o.group(1)) if o else None)
+    return m.group(1).lower() if m else None
 
 
 def harmony_windows(hdc, serial):
@@ -983,9 +1012,9 @@ def harmony_locked(windows):
     return any(w.startswith(HARMONY_LOCK_WINDOW) for w in windows)
 
 
-def wake_harmony(hdc, serial, keep_awake):
+def wake_harmony(hdc, serial, keep_awake, screen_off_ms=None):
     info = {"platform": "harmony", "attempted": True, "actions": [], "notes": []}
-    state, override_prev = harmony_power(hdc, serial)
+    state = harmony_power(hdc, serial)
     info["state_before"] = state
     if state is None:
         info["notes"].append("读不到电源状态(hidumper PowerManagerService),仍尝试唤醒")
@@ -1006,27 +1035,39 @@ def wake_harmony(hdc, serial, keep_awake):
         if locked:
             info["notes"].append("上滑后仍在锁屏(多半设了 PIN/密码),请手动解锁后重试")
     info["locked"] = locked
-    if keep_awake:
+    # 鸿蒙只有 OverrideTimeout 一个旋钮:常亮和「放宽到 N 分钟」是同一条命令的不同取值,
+    # 显式 --keep-awake 优先(取更长的 30 分钟),不叠加两条 restore。
+    # 它是覆盖值而非用户设置,所以只要设过就记一条 restore,release 恒用 -r 撤掉覆盖。
+    target_ms = KEEP_AWAKE_MS if keep_awake else screen_off_ms
+    if target_ms:
         rc, out, _ = run([hdc, "-t", serial, "shell", "power-shell", "timeout",
-                          "-o", str(KEEP_AWAKE_MS)], timeout=WAKE_CMD_TIMEOUT)
+                          "-o", str(target_ms)], timeout=WAKE_CMD_TIMEOUT)
         if rc == 0 and "Override" in (out or ""):
-            info["actions"].append(f"power-shell timeout -o {KEEP_AWAKE_MS}")
-            info["restore"] = {"type": "harmony_timeout", "prev": override_prev}
-    info["state"] = harmony_power(hdc, serial)[0]
+            info["actions"].append(f"power-shell timeout -o {target_ms}")
+            add_restore(info, {"type": "harmony_timeout"})
+        elif not keep_awake:
+            info["notes"].append("改不动屏幕超时,测试中途可能仍会熄屏(可再调 wake)")
+    info["state"] = harmony_power(hdc, serial)
     return info
 
 
-def wake_device(platform_, kind, device_id, keep_awake=False):
-    """亮屏 + 解锁;可选临时常亮,返回可直接塞进结果 JSON 的 dict。"""
+def wake_device(platform_, kind, device_id, keep_awake=False, screen_off_ms=None):
+    """亮屏 + 解锁 + (真机)放宽自动锁屏时长,返回可直接塞进结果 JSON 的 dict。
+
+    放宽超时只对真机做:模拟器熄屏不影响自动化(adb/hdc 仍能点亮),而改设置要在
+    release 时还原,给一台随时可能被删掉的模拟器留还原债不划算。
+    """
     if not device_id:
         return {"attempted": False, "reason": "no_device_id"}
+    if kind != "physical":
+        screen_off_ms = None
     if platform_ == "android":
         adb = tool("adb")
-        return (wake_android(adb, device_id, keep_awake) if adb
+        return (wake_android(adb, device_id, keep_awake, screen_off_ms) if adb
                 else {"attempted": False, "reason": "adb_missing"})
     if platform_ == "harmony":
         hdc = hdc_tool()
-        return (wake_harmony(hdc, device_id, keep_awake) if hdc
+        return (wake_harmony(hdc, device_id, keep_awake, screen_off_ms) if hdc
                 else {"attempted": False, "reason": "hdc_missing"})
     if kind == "simulator":     # iOS 模拟器不会熄屏,也没有锁屏
         return {"attempted": False, "reason": "ios_simulator_no_lockscreen"}
@@ -1034,10 +1075,10 @@ def wake_device(platform_, kind, device_id, keep_awake=False):
             "notes": ["iOS 真机无法程序解锁:请在 UI 测试前手动解锁"]}
 
 
-def safe_wake(platform_, kind, device_id, keep_awake):
+def safe_wake(platform_, kind, device_id, keep_awake, screen_off_ms=None):
     """亮屏是锦上添花:任何异常都吞掉,绝不让 acquire 因此失败。"""
     try:
-        info = wake_device(platform_, kind, device_id, keep_awake)
+        info = wake_device(platform_, kind, device_id, keep_awake, screen_off_ms)
     except Exception as e:  # noqa: BLE001
         return {"attempted": False, "reason": f"error: {e}"}
     if info.get("attempted"):
@@ -1050,45 +1091,108 @@ def safe_wake(platform_, kind, device_id, keep_awake):
     return info
 
 
+def as_restore_list(value):
+    """screen_restore 兼容两种形态:v2 之前是单个 dict,现在是 dict 列表。"""
+    if isinstance(value, dict):
+        return [value]
+    return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
+
+
 def record_screen_restore(key, screen):
-    """把待还原的原值记进锁,**只记第一次**。
+    """把待还原的原值记进锁,同一 type **只记第一次**。
 
     重复 wake(测试中途反复熄屏)时若覆写,第二次读到的"原值"已经是我们自己设的
-    常亮值,release 就会把设备永久留在常亮状态。
+    常亮 / 放宽值,release 就会把设备永久留在那个状态。
     """
-    r = (screen or {}).get("restore")
-    if not r or not key:
+    entries = as_restore_list((screen or {}).get("restore"))
+    if not entries or not key:
         return
     meta = read_lock(key)
-    if meta is None or meta.get("screen_restore"):
+    if meta is None:
         return
-    update_lock(key, screen_restore=r)
+    saved = as_restore_list(meta.get("screen_restore"))
+    known = {e.get("type") for e in saved}
+    fresh = [e for e in entries if e.get("type") not in known]
+    if fresh:
+        update_lock(key, screen_restore=saved + fresh)
+
+
+def restore_one(dev, entry):
+    """还原一条设备设置,返回已还原的 type(失败返回 None)。"""
+    kind = entry.get("type")
+    if kind == "android_screen_off_timeout":
+        adb = tool("adb")
+        if not adb:
+            return None
+        # 原值读不到时按 1 分钟兜底,总之不能把「测试期放宽」留成设备的常态
+        prev = entry.get("prev") or SCREEN_OFF_FALLBACK_MS
+        rc, _, _ = run([adb, "-s", dev, "shell", "settings", "put", "system",
+                        "screen_off_timeout", str(prev)], timeout=RESTORE_TIMEOUT)
+        return kind if rc == 0 else None
+    if kind == "android_stayon":
+        adb = tool("adb")
+        if not adb:
+            return None
+        rc, _, _ = run([adb, "-s", dev, "shell", "settings", "put", "global",
+                        "stay_on_while_plugged_in", str(entry.get("prev", "0"))],
+                       timeout=RESTORE_TIMEOUT)
+        return kind if rc == 0 else None
+    if kind == "harmony_timeout":
+        hdc = hdc_tool()
+        if not hdc:
+            return None
+        # 恒用 -r 交还系统设置(Settings 里的熄屏时长),不回写 acquire 时读到的
+        # OverrideTimeout:那是系统自己托管的瞬态值——设备一进 SLEEP,系统就会挂上
+        # 一个 10000ms 的 override,把它当“用户原值”写回去,反而会让醒着的设备 10 秒就熄屏。
+        rc, _, _ = run([hdc, "-t", dev, "shell", "power-shell", "timeout", "-r"],
+                       timeout=RESTORE_TIMEOUT)
+        return kind if rc == 0 else None
+    return None
 
 
 def restore_screen(meta):
-    """release / 回收陈旧锁时还原 acquire 改过的屏幕超时设置(尽力而为)。"""
-    r = (meta or {}).get("screen_restore")
+    """release / 回收陈旧锁时还原改过的屏幕设置(尽力而为),返回已还原的 type 列表。"""
     dev = (meta or {}).get("device_id")
-    if not isinstance(r, dict) or not dev:
+    entries = as_restore_list((meta or {}).get("screen_restore"))
+    if not dev or not entries:
+        return []
+    done = []
+    for e in entries:
+        try:
+            if restore_one(dev, e):
+                done.append(e.get("type"))
+        except Exception:  # noqa: BLE001
+            pass
+    return done
+
+
+def lock_screen(meta):
+    """release 时把真机熄屏落锁:测完的手机不该一直亮着、停在解锁态。
+
+    模拟器不做——它没有隐私/耗电问题,而下个会话还得再唤醒一次;
+    iOS 真机也没有可用的程序熄屏通道。返回已熄屏的平台名,没做/失败返回 None。
+    """
+    dev = (meta or {}).get("device_id")
+    plat = (meta or {}).get("platform")
+    if not dev or (meta or {}).get("kind") != "physical":
         return None
     try:
-        if r.get("type") == "android_stayon":
+        if plat == "android":
             adb = tool("adb")
             if not adb:
                 return None
-            rc, _, _ = run([adb, "-s", dev, "shell", "settings", "put", "global",
-                            "stay_on_while_plugged_in", str(r.get("prev", "0"))],
+            # KEYCODE_SLEEP 是幂等的:已熄屏再发一次仍是熄屏。
+            # KEYCODE_POWER 是开关型,屏幕已灭时会把它重新点亮,不能用。
+            rc, _, _ = run([adb, "-s", dev, "shell", "input", "keyevent", "KEYCODE_SLEEP"],
                            timeout=RESTORE_TIMEOUT)
-            return "android_stayon" if rc == 0 else None
-        if r.get("type") == "harmony_timeout":
+            return "android" if rc == 0 else None
+        if plat == "harmony":
             hdc = hdc_tool()
             if not hdc:
                 return None
-            prev = r.get("prev")
-            tail = ["-o", str(prev)] if prev else ["-r"]
-            rc, _, _ = run([hdc, "-t", dev, "shell", "power-shell", "timeout"] + tail,
+            rc, _, _ = run([hdc, "-t", dev, "shell", "power-shell", "suspend"],
                            timeout=RESTORE_TIMEOUT)
-            return "harmony_timeout" if rc == 0 else None
+            return "harmony" if rc == 0 else None
     except Exception:  # noqa: BLE001
         pass
     return None
@@ -1463,13 +1567,21 @@ def flush_warnings(warnings):
         log(w)
 
 
+def resolve_screen_off_ms(args):
+    """--screen-timeout(分钟)→ 毫秒;<=0 表示不碰设备的自动锁屏设置。"""
+    minutes = getattr(args, "screen_timeout", None)
+    if minutes is None:
+        minutes = SCREEN_OFF_DEFAULT_MIN
+    return int(minutes * 60000) if minutes > 0 else None
+
+
 def finish_acquire(c, owner, project, created, booted, reused, args, warnings):
-    """收尾:亮屏解锁 → 输出结果 JSON(亮屏失败不影响分配结果)。"""
+    """收尾:亮屏解锁 + 放宽真机自动锁屏 → 输出结果 JSON(失败不影响分配结果)。"""
     if args.no_wake:
         screen = {"attempted": False, "reason": "disabled_by_--no-wake"}
     else:
         screen = safe_wake(c["platform"], c["kind"], c.get("device_id"),
-                           args.keep_awake)
+                           args.keep_awake, resolve_screen_off_ms(args))
         record_screen_restore(c["key"], screen)
     result = build_result(c, owner, project, created, booted, reused)
     result["screen"] = screen
@@ -1696,7 +1808,7 @@ def cmd_release(args):
         keys = [m.get("device_key") for _, m, _ in list_locks()
                 if m and m.get("owner_pid") == owner]
     for k in keys:
-        if k and release_lock(k):
+        if k and release_lock(k, lock_screen_after=not args.no_lock):
             released.append(k)
         else:
             not_found.append(k)
@@ -1766,8 +1878,10 @@ def cmd_wake(args):
 
     results = []
     for m in targets:
+        # 无锁设备只做一次性唤醒:没有 meta 存原值,放宽了也没人负责还原
+        ms = resolve_screen_off_ms(args) if m.get("device_key") else None
         screen = safe_wake(m.get("platform"), m.get("kind"), m.get("device_id"),
-                           args.keep_awake)
+                           args.keep_awake, ms)
         record_screen_restore(m.get("device_key"), screen)
         results.append({"device_key": m.get("device_key"), "platform": m.get("platform"),
                         "device_id": m.get("device_id"), "name": m.get("name"),
@@ -1885,6 +1999,7 @@ def cmd_clean(args):
         if stale and reclaim_path(path):
             removed.append(label)
             restore_screen(meta)
+            lock_screen(meta)
         else:
             kept.append(label)
     emit({"ok": True, "action": "clean", "removed": removed, "kept": kept})
@@ -1924,9 +2039,13 @@ def main():
                         "环境变量 AI_DEVICE_EMULATOR_MEMORY 亦可设定;iOS 模拟器不支持")
     a.add_argument("--no-wake", action="store_true",
                    help="不做亮屏解锁(默认会唤醒并尝试解锁分配到的设备)")
+    a.add_argument("--screen-timeout", type=float, metavar="分钟",
+                   default=SCREEN_OFF_DEFAULT_MIN,
+                   help=f"持锁期间真机的自动锁屏时长(分钟,默认 {SCREEN_OFF_DEFAULT_MIN};"
+                        "0=不改设备设置)。release 时还原原值并熄屏落锁;模拟器不受影响")
     ak = a.add_mutually_exclusive_group()
     ak.add_argument("--keep-awake", action="store_true",
-                    help="显式在持锁期间临时常亮(默认不改设备设置;"
+                    help="显式在持锁期间临时常亮(比 --screen-timeout 更进一步:完全不熄屏;"
                          "长时间无人值守测试才用,release 时尽力还原)")
     ak.add_argument("--no-keep-awake", dest="keep_awake", action="store_false",
                     help=argparse.SUPPRESS)  # v1 兼容:新默认已是不常亮
@@ -1939,6 +2058,10 @@ def main():
     wg.add_argument("--all-mine", action="store_true", help="本 owner 持有的全部设备")
     w.add_argument("--owner", type=int, help="锁持有者 pid(默认取会话进程)")
     w.add_argument("--project", help="项目路径(默认当前目录,用于定位本会话的锁)")
+    w.add_argument("--screen-timeout", type=float, metavar="分钟",
+                   default=SCREEN_OFF_DEFAULT_MIN,
+                   help=f"顺带把真机自动锁屏时长设为 N 分钟(默认 {SCREEN_OFF_DEFAULT_MIN};"
+                        "0=不改;无锁设备一律不改)")
     wk = w.add_mutually_exclusive_group()
     wk.add_argument("--keep-awake", action="store_true",
                     help="显式在持锁期间临时常亮(默认只唤醒解锁;"
@@ -1953,6 +2076,8 @@ def main():
     g.add_argument("--device", help="按 device id / 名称释放")
     g.add_argument("--all-mine", action="store_true", help="释放本会话持有的全部锁")
     r.add_argument("--owner", type=int, help="配合 --all-mine(默认取会话进程)")
+    r.add_argument("--no-lock", action="store_true",
+                   help="释放后不熄屏落锁(默认会把真机熄屏,让它回到锁屏态)")
 
     sub.add_parser("status", help="设备 × 锁全景")
 

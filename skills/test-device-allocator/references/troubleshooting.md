@@ -43,36 +43,48 @@ export HDC_PATH=/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony
 
 **处置**:
 
-1. acquire 默认做一次唤醒 + 解锁,但不修改用户的自动锁屏设置。先看返回 JSON 的 `screen` 字段:`state` 应为 `awake`、`locked` 应为 `false`。
-2. 构建/安装可能已经超过屏幕超时;开始截图/点击前,以及测试中途又睡过去时,运行 `python3 <skill根>/scripts/device_lock.py wake --key <device_key>` 再点一次,不用重新 acquire。
+1. acquire 会做一次唤醒 + 解锁,真机还会把自动锁屏时长放宽到 10 分钟。先看返回 JSON 的 `screen` 字段:`state` 应为 `awake`、`locked` 应为 `false`,真机的 `actions` 里应有 `screen_off_timeout=600000ms`(鸿蒙是 `power-shell timeout -o 600000`)。
+2. 构建/安装超过 10 分钟仍会睡过去;开始截图/点击前,以及测试中途又睡过去时,运行 `python3 <skill根>/scripts/device_lock.py wake --key <device_key>` 再点一次,不用重新 acquire。需要更长可 acquire 时传 `--screen-timeout 30`。
 3. `screen.locked` 是 `true` → 设备设了 PIN / 图案 / 密码,系统不允许程序解锁,需要人工解一次。
-4. `screen.attempted` 是 `false`:`reason` 会说明原因——`disabled_by_--no-wake`(自己关掉的)、`ios_simulator_no_lockscreen`(不需要)、`ios_physical_manual_unlock`(iOS 真机只能在 UI 测试前手动解锁)、`adb_missing` / `hdc_missing`(工具链没找到)。
-5. 手动等价命令:
+4. `screen.notes` 里有"改不动屏幕超时" → 放宽失败(权限或 ROM 限制),按第 2 条用 `wake` 顶着测,或 `--keep-awake` 撑住整段。
+5. `screen.attempted` 是 `false`:`reason` 会说明原因——`disabled_by_--no-wake`(自己关掉的)、`ios_simulator_no_lockscreen`(不需要)、`ios_physical_manual_unlock`(iOS 真机只能在 UI 测试前手动解锁)、`adb_missing` / `hdc_missing`(工具链没找到)。
+6. 手动等价命令:
 
 ```bash
 # Android
 adb -s <id> shell input keyevent KEYCODE_WAKEUP
 adb -s <id> shell wm dismiss-keyguard
+adb -s <id> shell settings get system screen_off_timeout      # 先存原值
+adb -s <id> shell settings put system screen_off_timeout 600000
 # 只有确实需要无人值守长测试时才使用(必须记住原值并还原)
 adb -s <id> shell svc power stayon true
 
 # HarmonyOS
 hdc -t <id> shell power-shell wakeup
 hdc -t <id> shell uinput -T -m 540 1870 540 580 300    # 上滑解锁,坐标按分辨率折算
-hdc -t <id> shell power-shell timeout -o 1800000       # 只用于显式长测试
+hdc -t <id> shell power-shell timeout -o 600000        # 撤销用 timeout -r,别回写读到的 OverrideTimeout
 ```
 
-6. 默认不改任何持久屏幕设置。只有显式 `--keep-awake` 才把原值记在锁的 meta(`screen_restore`)里,`release` / 回收陈旧锁 / `clean` 时尽力还原;完全不想动设备就 acquire 传 `--no-wake`。
+7. 改过的设置都记在锁 meta 的 `screen_restore` 里,`release` / 回收陈旧锁 / `clean` 时尽力还原;完全不想动设备就 acquire 传 `--no-wake`,只想跳过放宽超时传 `--screen-timeout 0`。
 
-## 测试后手机一直亮屏
+## 测试后手机一直亮屏 / 不会自动锁屏
 
-Android 先查 `adb -s <id> shell settings get global stay_on_while_plugged_in`。`7` 通常是 `svc power stayon true` 开启了 USB / AC / 无线充电全常亮;`dumpsys power` 里同时会看到 `mStayOn=true`。确认这是测试遗留、而非用户自己的开发者选项后,再执行:
+正常路径下 `release` 会还原时长并把真机熄屏。会话崩在半路时按下面两项自查:
 
 ```bash
+adb -s <id> shell settings get system screen_off_timeout        # 600000 = 遗留的放宽值
+adb -s <id> shell settings put system screen_off_timeout 60000  # 改回 1 分钟(或用户自己的值)
+adb -s <id> shell settings get global stay_on_while_plugged_in  # 7 = --keep-awake 遗留的常亮
 adb -s <id> shell settings put global stay_on_while_plugged_in 0
 ```
 
-不要在没有原值或用户确认时对所有设备自动批量重置。新版默认不再设置常亮,因此漏 release 也不会再造成这个问题。
+`dumpsys power` 里的 `mStayOn=true` 同样指向常亮。鸿蒙查 `hidumper -s PowerManagerService -a -s` 的 `OverrideTimeout`,撤销用 `hdc -t <id> shell power-shell timeout -r`——注意设备进入 SLEEP 后系统自己会挂一个 `OverrideTimeout=10000ms`,那是正常的,不用管。
+
+下次任意 acquire 起手的陈旧锁清扫会自动做这些还原,所以多数情况不需要手动介入;也不要在没有原值或用户确认时对所有设备批量重置。
+
+## 测试后手机意外熄屏 / 锁屏了
+
+`release` 会主动把真机熄屏落锁(Android `KEYCODE_SLEEP`、鸿蒙 `power-shell suspend`),这是有意为之:测完的手机不该一直亮着停在解锁态。要保留亮屏就传 `release --no-lock`。模拟器不受影响(不熄屏、不关机)。
 
 ## 手动清理
 
@@ -131,7 +143,8 @@ python3 <skill根>/scripts/device_lock.py clean --all
 - offline / 卡死的模拟器串号计入内存配额(qemu 进程还活着就仍占内存);想释放配额先把它冷关掉。
 - 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。
 - 鸿蒙候选永远不需要启动,**不过内存闸门**;但已在跑的鸿蒙模拟器会计入闸门的运行中模拟器数(它也是 QEMU 虚拟机)。只有 `--platform` 里点了 harmony 时才去查(否则会为纯 Android 的 acquire 平白拉起 hdc 服务);`status` 只要装了 hdc 就会枚举。
-- 亮屏解锁全程 fail-soft:任何一步失败都只写 stderr,acquire / wake 不会因此失败。
+- 亮屏解锁、放宽超时、release 的还原与熄屏全程 fail-soft:任何一步失败都只写 stderr,acquire / wake / release 不会因此失败(release 恒 exit 0)。
+- 屏幕设置只改真机、只改一次:同一 type 的原值在锁 meta 里只记第一次,重复 acquire / wake 不会把原值污染成我们自己设的值。
 - `--memory` 只在**需要启动**模拟器时才有意义:领到真机、或复用已经跑着的模拟器时无效(跑起来的 VM 改不了 RAM),此时结果 JSON 的 `memory_mb` 为 null。
 - `--memory` 只对本工具新建的 AVD 写 `config.ini`;启动用户自己的 AVD(如 Pixel_10)只覆盖本次运行,不改他们的配置。手动持久修改:改 `~/.android/avd/<名>.avd/config.ini` 的 `hw.ramSize`(纯数字按 MB 解释)。
 - 改了 RAM 的那次启动一定是冷启动(quickboot 快照要求 RAM 一致),acquire 会慢 1-2 分钟;之后维持同一值就能继续吃快照。
