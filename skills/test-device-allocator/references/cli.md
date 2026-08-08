@@ -74,11 +74,11 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 启动或新建模拟器会增加宿主内存占用,过闸才执行;tier 1(真机)与 tier 2(已运行模拟器)不受影响。两项检查任一不过即拦截:
 
 1. **并发配额**:`运行中模拟器数 < max_vms`。运行数 = adb 可见的全部 `emulator-*` 串号(含 offline——卡死的 qemu 进程仍占内存)+ iOS Booted 模拟器。`max_vms` 取值优先级:`--max-emulators` > `AI_DEVICE_MAX_EMULATORS` > 自动推导 `clamp(⌊(总内存-8GB)/每台开销⌋, 1..4)`。
-2. **可用内存**:当前可用 ≥ 每台开销 + 2GB 安全垫。**运行中模拟器数为 0 时本项降级为告警,不拦截**——闸门的使命是防并发互踩,第一台恒放行(操作系统吃满内存是常态,静态阈值在 0 台时必然误杀)。macOS 按内核 memorystatus 水位估算(`sysctl kern.memorystatus_level` 百分比 × 总内存,即 `memory_pressure` 报告的 free percentage,含压缩器与文件缓存可回收量;sysctl 不可用时退回 `vm_stat` 的 free+inactive+purgeable+speculative),Linux 用 `MemAvailable`,Windows 用 `GlobalMemoryStatusEx`。
+2. **可用内存**:两道下限。先看 **6GB 硬下限**——当前可用 < 6GB 时一律拦截,**不看运行中模拟器数,第一台也拦**(防止把宿主拖进 swap);过了硬下限再看动态估算:当前可用 ≥ 每台开销 + 2GB 安全垫,**动态估算在运行中模拟器数为 0 时降级为告警,不拦截**——这一层的使命是防并发互踩(估算口径保守,0 台时容易误杀)。macOS 按内核 memorystatus 水位估算(`sysctl kern.memorystatus_level` 百分比 × 总内存,即 `memory_pressure` 报告的 free percentage,含压缩器与文件缓存可回收量;sysctl 不可用时退回 `vm_stat` 的 free+inactive+purgeable+speculative),Linux 用 `MemAvailable`,Windows 用 `GlobalMemoryStatusEx`。
 
 **每台开销**:默认 4.0GB(≈2GB guest RAM + QEMU/图形转发);`--platform android --memory <MB>` 时改为 `MB/1024 + 1.5GB`。`--platform any` / `ios` 即使传了 `--memory` 也按默认 4.0GB 估算——候选可能落到无法限内存的 iOS 模拟器上。16GB 机上的 `max_vms`:默认 2,`--memory 1024` → 3,`--memory 1536`/`2048` → 2;8GB 机恒为 1;24GB+ 触顶 4。
 
-拦截行为:tier 3 候选被跳过(stderr 记一条日志);走到 tier 4 仍被拦 → exit 9 `MEMORY_PRESSURE`。四个豁免:**运行中模拟器数为 0 时可用内存检查只告警不拦(配额下限即 1,故第一台恒放行,exit 9 只可能出现在已有模拟器在跑时)**;`--device` 显式指定只告警不拦;幂等重取中重启自己已持有的模拟器不拦(净占用不增);内存探测失败自动放行(fail-open)。`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1` 整体跳过。
+拦截行为:tier 3 候选被跳过(stderr 记一条日志);走到 tier 4 仍被拦 → exit 9 `MEMORY_PRESSURE`。四个豁免:**运行中模拟器数为 0 时,动态估算只告警不拦(6GB 硬下限不豁免——可用内存 < 6GB 时第一台也会 exit 9)**;`--device` 显式指定只告警不拦(含硬下限);幂等重取中重启自己已持有的模拟器不拦(净占用不增);内存探测失败自动放行(fail-open)。`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1` 整体跳过(含硬下限)。
 
 ### 单台模拟器内存(`--memory`)
 
@@ -182,9 +182,9 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ```json
 {"ok": true, "action": "status", "lock_root": "…",
- "memory": {"total_gb": 16.0, "available_gb": 5.2, "running_vms": 1, "max_vms": 2,
+ "memory": {"total_gb": 16.0, "available_gb": 6.2, "running_vms": 1, "max_vms": 2,
             "per_vm_gb": 4.0, "reserve_gb": 8.0, "vm_overhead_gb": 1.5,
-            "can_start_new_vm": true},
+            "hard_floor_gb": 6.0, "can_start_new_vm": true},
  "devices": [{"key": "…", "platform": "android|ios|harmony", "kind": "…",
               "device_id": "…", "name": "…",
               "state": "running|booted|stopped|shutdown|connected",
@@ -217,7 +217,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | 6 | ENV_MISSING | 所选平台工具链缺失(无 Android SDK / 无 xcrun / 找不到 hdc);仅当该平台是唯一所选时才报错,组合里则跳过并告警 |
 | 7 | BUSY | `--device` 指定的设备被存活锁占用 |
 | 8 | INTERNAL | 未预期异常(traceback 在 stderr) |
-| 9 | MEMORY_PRESSURE | 内存闸门拦截:配额已满或可用内存不足,不再启动/新建模拟器(真机不受影响;0 台模拟器在跑时不会触发——第一台恒放行) |
+| 9 | MEMORY_PRESSURE | 内存闸门拦截:配额已满、可用内存低于 6GB 硬下限(第一台也拦),或不足以再开一台,不再启动/新建模拟器(真机不受影响) |
 
 ## 幂等与并发语义
 

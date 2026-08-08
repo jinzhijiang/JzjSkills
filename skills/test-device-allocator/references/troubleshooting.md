@@ -117,7 +117,7 @@ python3 <skill根>/scripts/device_lock.py clean --all
 | 6 ENV_MISSING | 平台工具链缺失 | 装 Android SDK / Xcode / DevEco Studio(hdc,或设 `HDC_PATH`);Linux 宿主不支持 iOS;组合平台里缺一个只跳过并告警,不报错 |
 | 7 BUSY | `--device` 指定的设备被占 | 去掉 `--device` 另挑;或 `status` 看占用者是谁 |
 | 8 INTERNAL | 未预期异常 | 看 stderr 的 traceback 排查 |
-| 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满或可用内存不足每台开销 + 2GB;0 台模拟器在跑时不触发,第一台恒放行) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)后重试;Android 可 `--memory 1024` 压小单台换配额;确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
+| 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满、可用内存低于 6GB 硬下限——第一台也拦,或不足每台开销 + 2GB) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)、退出大进程释放内存后重试;Android 可 `--memory 1024` 压小单台换配额(硬下限不受影响);确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
 
 ## 模拟器卡死(内存超卖)
 

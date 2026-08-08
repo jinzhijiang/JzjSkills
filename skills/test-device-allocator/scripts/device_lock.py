@@ -66,6 +66,7 @@ MEM_RESERVE_GB = 8.0    # 预留给 OS / IDE / 构建进程的基线内存
 MEM_PER_VM_GB = 4.0     # 未指定 --memory 时每台的估算宿主开销(≈2GB guest RAM + 转发)
 MEM_VM_OVERHEAD_GB = 1.5  # 指定 --memory 时,guest RAM 之外的宿主开销(QEMU + 图形转发)
 MEM_MIN_FREE_GB = 2.0   # 启动新 VM 时,估算开销之外还需的安全垫
+MEM_HARD_FLOOR_GB = 6.0  # 可用内存硬下限:低于此值不启动/新建任何模拟器(第一台也拦)
 MEM_MAX_VMS_CAP = 4     # 自动配额上限(--max-emulators / AI_DEVICE_MAX_EMULATORS 可突破)
 
 # --memory:Android 模拟器 guest RAM(emulator -memory / config.ini hw.ramSize)。
@@ -422,6 +423,7 @@ def mem_policy(max_override=None, ignore=False, memory_mb=None, include_harmony=
             "total_gb": None, "available_gb": None,
             "running_vms": None, "max_vms": None,
             "per_vm_gb": vm_gb, "memory_mb": memory_mb,
+            "hard_floor_gb": MEM_HARD_FLOOR_GB,
             "need_gb": round(vm_gb + MEM_MIN_FREE_GB, 1)}
     if ignore or os.environ.get("AI_DEVICE_MEM_OVERRIDE", "").lower() in ("1", "true", "yes"):
         info["enabled"] = False
@@ -443,11 +445,15 @@ def mem_policy(max_override=None, ignore=False, memory_mb=None, include_harmony=
         info["blocked"] = True
         info["reason"] = (f"并发配额已满:宿主内存 {info['total_gb']}GB 对应上限 "
                           f"{max_vms} 台模拟器{sized},当前已有 {running} 台在运行")
+    elif avail is not None and avail < MEM_HARD_FLOOR_GB:
+        # 硬下限不看运行数:低于它连第一台也不放行,防止把宿主拖进 swap。
+        info["blocked"] = True
+        info["reason"] = (f"可用内存不足:当前约 {info['available_gb']}GB,"
+                          f"低于 {MEM_HARD_FLOOR_GB:g}GB 硬下限,不启动模拟器")
     elif avail is not None and avail < vm_gb + MEM_MIN_FREE_GB:
         if running == 0:
-            # 闸门的使命是防「并发」模拟器互相拖垮;一台都没跑时不拦第一台,
-            # 只告警。操作系统吃满内存是常态(缓存/压缩器),静态阈值在
-            # running=0 时必然误杀,而配额下限本就是 1。
+            # 硬下限之上,动态估算只防「并发」模拟器互相拖垮;一台都没跑时
+            # 不拦第一台,只告警——估算口径保守,running=0 时容易误杀。
             info["warning"] = (f"可用内存偏紧:约 {info['available_gb']}GB,"
                                f"估算需 {info['need_gb']}GB{sized};当前 0 台"
                                f"模拟器在运行,放行第一台")
@@ -1972,15 +1978,18 @@ def cmd_status(args):
     if max_vms is None:
         max_vms = auto_max_vms(total)
     running_vms = len(running_avds) + len(booted) + harmony_vms
-    # 与 mem_policy 同规则:0 台在跑时可用内存检查不拦第一台。
+    # 与 mem_policy 同规则:低于 6GB 硬下限恒拦;其上 0 台在跑时动态估算不拦第一台。
     quota_ok = max_vms is None or running_vms < max_vms
-    avail_ok = (running_vms == 0 or avail is None
-                or avail >= per_vm_gb() + MEM_MIN_FREE_GB)
+    avail_ok = (avail is None
+                or (avail >= MEM_HARD_FLOOR_GB
+                    and (running_vms == 0
+                         or avail >= per_vm_gb() + MEM_MIN_FREE_GB)))
     memory = {"total_gb": None if total is None else round(total, 1),
               "available_gb": None if avail is None else round(avail, 1),
               "running_vms": running_vms, "max_vms": max_vms,
               "per_vm_gb": per_vm_gb(), "reserve_gb": MEM_RESERVE_GB,
               "vm_overhead_gb": MEM_VM_OVERHEAD_GB,
+              "hard_floor_gb": MEM_HARD_FLOOR_GB,
               "can_start_new_vm": quota_ok and avail_ok}
     emit({"ok": True, "action": "status", "lock_root": lock_root(),
           "memory": memory,
