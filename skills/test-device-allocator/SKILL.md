@@ -22,22 +22,22 @@ description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、i
 `--platform` 支持单值,也支持**逗号组合**(如 `android,harmony`);组合时同一 tier 内按所列顺序优先。
 
 - 用户或任务**明确指定了平台** → 按指定传 `--platform android|ios|harmony`。
-- **Flutter 项目未说明平台、也没有开发平台特有功能 → 默认 Android**:`acquire` 不传 `--platform` 即为 android,不要主动升级成 `any` 或 iOS。
+- **Flutter 项目未说明平台、也没有开发平台特有功能 → 默认 Android**:`acquire` 不传 `--platform` 即为 android,不要主动升级成 `any` 或 iOS。**项目支持鸿蒙时例外**:默认改用 `--platform android,harmony`,鸿蒙真机可直接用于测试(见下节)。
 - 项目明显只面向某一平台(如任务在改 iOS 侧代码 / 只配置了某端)→ 用对应平台。
 - 两端都要测或用户明说都可以 → `--platform any`(= android + ios,**不含鸿蒙**;此时无空闲设备会优先新建 iOS 模拟器,更快)。
 - Android 原生项目恒为 android;`--platform ios` 仅 macOS 可用。
 
-### 什么时候可以用鸿蒙设备
+### Flutter 项目支持鸿蒙 → 鸿蒙真机可直接用于测试
 
-**三个条件同时满足**才把鸿蒙放进分配池:
+只要 Flutter 项目**支持鸿蒙**——仓库根有 `ohos/` 目录,且用的是 OpenHarmony 版 Flutter SDK(能 `flutter build hap`)——就默认把鸿蒙放进分配池:`acquire --platform android,harmony`。鸿蒙真机是与 Android 同级的测试目标:Android 设备被占、或内存闸门不允许再开模拟器时,直接跑到鸿蒙真机 / 已启动的鸿蒙模拟器上验证,而不是干等。
 
-1. Flutter 项目**有鸿蒙模块**(仓库根有 `ohos/` 目录),且用的是 OpenHarmony 版 Flutter SDK(能 `flutter build hap`);
-2. 本次开发/验证的功能**不是鸿蒙特有**的(不是只有鸿蒙才有的能力);
-3. 这个功能**能在鸿蒙设备上跑起来**(没有依赖 Android/iOS 独有的插件或原生实现)。
+两种情况收窄平台,不用组合:
 
-满足时用 `--platform android,harmony`:先抢 Android 设备,Android 都被占了就用鸿蒙真机 / 已启动的鸿蒙模拟器,而不是干等或去新建模拟器。任一条不满足就别放开——普通 Flutter SDK 编不出 hap,鸿蒙设备拿到手也跑不起来。
-
+- 本次功能**依赖 Android/iOS 独有的插件或原生实现**(鸿蒙上跑不起来)→ 只用对应平台。
 - 本次就是在做**鸿蒙特有功能** → `--platform harmony`。
+
+不支持鸿蒙的项目(没有 `ohos/` 目录,或普通 Flutter SDK)别放开——编不出 hap,鸿蒙设备拿到手也跑不起来。
+
 - 本 skill 只分配**已经连上**(`hdc list targets` 可见且 Connected)的鸿蒙目标:真机走 tier1,已启动的鸿蒙模拟器走 tier2。**不会**帮你启动或新建鸿蒙模拟器——那是 deveco-studio-emulator 的活,先用它把模拟器跑起来,再回来 acquire。
 
 ## 前置条件
@@ -68,7 +68,7 @@ cd <被测项目根目录>
 
 # 1. 领设备(默认 android,真机最优先;全被占时自动新建模拟器并等它就绪)
 #    要测 iOS 传 --platform ios;两端皆可传 --platform any
-#    带 ohos 模块、本次功能不是鸿蒙特有的 Flutter 项目:--platform android,harmony
+#    支持鸿蒙的 Flutter 项目(有 ohos/ + OpenHarmony 版 SDK)默认:--platform android,harmony
 OUT=$(python3 "$SKILL_DIR/scripts/device_lock.py" acquire --owner $PPID --project "$PWD")
 DEVICE_ID=$(echo "$OUT"  | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_id"])')
 DEVICE_KEY=$(echo "$OUT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_key"])')
