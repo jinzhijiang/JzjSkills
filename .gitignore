@@ -1,2 +1,3 @@
 .DS_Store
-.hvigor__pycache__/
+.hvigor/
+__pycache__/

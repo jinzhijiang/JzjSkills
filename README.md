@@ -45,6 +45,10 @@ JzjSkills/
 │   │   ├── assets/changelog.config.js   # 全局配置模板
 │   │   ├── references/                  # config、cli、troubleshooting
 │   │   └── scripts/check_commit_msg.py  # python3 标准库，提交前自检 / commit-msg 钩子
+│   ├── chrome-file-upload-bridge/       # 自建：绕开 MCP file_upload 限制往网页传文件
+│   │   ├── SKILL.md
+│   │   ├── agents/openai.yaml
+│   │   └── scripts/cors_server.py       # python3 标准库，带 CORS + PNA 头的本地静态服务
 │   ├── codex-image/                     # 外部引入：用 codex 订阅额度生图
 │   │   ├── SKILL.md
 │   │   ├── LICENSE                      # MIT，随上游一并保留
@@ -122,6 +126,7 @@ description: 简短描述这个 skill 做什么
 | `aliyun-oss-ossutil` | [cinience/alicloud-skills](https://github.com/cinience/alicloud-skills) | [skills/storage/oss/aliyun-oss-ossutil/](https://github.com/cinience/alicloud-skills/tree/main/skills/storage/oss/aliyun-oss-ossutil) | MIT | 2026-08-04 | 引入上游 `b22dc0a`；上游按 `storage/oss/` 分层存放，这里拍平为 `skills/aliyun-oss-ossutil/`，因此改了两处写死的旧路径（`SKILL.md` 的校验命令、`scripts/check_ossutil.py` 改为按 `__file__` 自定位），其余原样；`LICENSE` 取自上游仓库根目录 |
 | `countly-data-analysis` | 自建 / 内部整理 | — | — | 2026-08-05 | 自建；原在 `flutter_todo/.agents/skills/`，因笔笔记账也接入 Countly 而收拢到这里并去项目化：凭据按 **git 根目录名**解析（`~/.config/ai-ignore-config/<项目名>/countly.env`），避免从 A 项目静默查到 B 项目的数据；`scripts/countly_query.sh` 提供 list / event / range / views / crash / summary |
 | `publish-app-huawei` | 自建 / 华为上架实操整理 | — | — | 2026-08-09 | 自建；原在 `flutter_todo/.agents/skills/`，因笔笔记账首次上架华为而收拢到这里并去项目化：凭据按 **git 根目录名**解析（`~/.config/ai-ignore-config/<项目名>/appgallery.env`，linked worktree 也解析到主仓名）；覆盖首次上架（控制台建应用/填信息的完整走查与踩坑：emoji 拒收、截图强制 9:16、内容判重、包名随首包永久绑定、测试账号注销）与后续更新（`scripts/appgallery_publish.py` 服务账号 JWT 直连 AGC：doctor / appid-list / publish / submit） |
+| `chrome-file-upload-bridge` | 自建 / 内部整理 | — | — | 2026-08-10 | 自建；从笔笔记账上架 OPPO 的实操中提炼：MCP `file_upload` 对 <10MB 的文件会吞掉 `paths` 参数、>10MB 又撞它自己的 10MB 上限，computer-use 对浏览器只给 read 权限点不了系统文件框，三者叠加等于不可用。解法是本地起 `scripts/cors_server.py`（带 `Access-Control-Allow-Private-Network`，否则 HTTPS 页面发往 127.0.0.1 的请求会永远 pending），再用 `javascript_tool` 执行 `fetch → new File → DataTransfer → dispatch change` 注入，字节不过 MCP 桥所以没有体积上限；含首次放行提示、顶层 `await` 撞 45s CDP 超时的规避、注入后 `input.files` 被组件清空属正常等坑 |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-07 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`）；acquire 会亮屏解锁并把**真机**自动锁屏放宽到 10 分钟（`--screen-timeout` 可调），release 还原原值并熄屏落锁，长时间无人值守才显式用 `--keep-awake` |
 
 ## 更新已引入的 Skill

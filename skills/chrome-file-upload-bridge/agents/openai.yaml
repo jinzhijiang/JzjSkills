@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chrome File Upload Bridge"
+  short_description: "本地 CORS 服务 + JS 注入，绕开 MCP file_upload 的体积与参数限制往网页传文件"
+  default_prompt: "Use $chrome-file-upload-bridge to upload this local file into the page's file input."
