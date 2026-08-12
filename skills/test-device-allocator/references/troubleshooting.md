@@ -65,26 +65,29 @@ hdc -t <id> shell uinput -T -m 540 1870 540 580 300    # 上滑解锁,坐标按�
 hdc -t <id> shell power-shell timeout -o 600000        # 撤销用 timeout -r,别回写读到的 OverrideTimeout
 ```
 
-7. 改过的设置都记在锁 meta 的 `screen_restore` 里,`release` / 回收陈旧锁 / `clean` 时尽力还原;完全不想动设备就 acquire 传 `--no-wake`,只想跳过放宽超时传 `--screen-timeout 0`。
+7. 改过的设置都记在锁 meta 的 `screen_restore` 里,`release` / 回收陈旧锁 / `clean` 时尽力收尾(Android 自动锁屏统一设为 1 分钟、不回写原值;鸿蒙 `timeout -r` 撤销覆盖);完全不想动设备就 acquire 传 `--no-wake`,只想跳过放宽超时传 `--screen-timeout 0`。
 
 ## 测试后手机一直亮屏 / 不会自动锁屏
 
-正常路径下 `release` 会还原时长并把真机熄屏。会话崩在半路时按下面两项自查:
+正常路径下 `release` 会按 Home 退出被测 app、把自动锁屏统一设为 1 分钟,再把真机熄屏。会话崩在半路时按下面三项自查:
 
 ```bash
+adb -s <id> shell input keyevent KEYCODE_HOME                   # 被测 app 常设「保持常亮」flag,留在前台会顶住自动锁屏
 adb -s <id> shell settings get system screen_off_timeout        # 600000 = 遗留的放宽值
-adb -s <id> shell settings put system screen_off_timeout 60000  # 改回 1 分钟(或用户自己的值)
+adb -s <id> shell settings put system screen_off_timeout 60000  # 改回 1 分钟(release 的统一收尾值)
 adb -s <id> shell settings get global stay_on_while_plugged_in  # 7 = --keep-awake 遗留的常亮
 adb -s <id> shell settings put global stay_on_while_plugged_in 0
 ```
 
 `dumpsys power` 里的 `mStayOn=true` 同样指向常亮。鸿蒙查 `hidumper -s PowerManagerService -a -s` 的 `OverrideTimeout`,撤销用 `hdc -t <id> shell power-shell timeout -r`——注意设备进入 SLEEP 后系统自己会挂一个 `OverrideTimeout=10000ms`,那是正常的,不用管。
 
-下次任意 acquire 起手的陈旧锁清扫会自动做这些还原,所以多数情况不需要手动介入;也不要在没有原值或用户确认时对所有设备批量重置。
+个别第三方 ROM(实测 Lineage 22 / polaris)会无视 `KEYCODE_SLEEP`、`KEYCODE_POWER` 等一切电源键注入,甚至自动超时策略也不生效(`mScreenOffTimeoutSetting=60000`、无 wakelock、前台是桌面,却一直 Awake)。release 会在两种按键都确认无效后写一条 stderr 日志;这种设备只能人手按物理电源键熄屏,好在 release 的 Home 已把持常亮 flag 的被测 app 退出了前台,不会再被它顶住。
 
-## 测试后手机意外熄屏 / 锁屏了
+下次任意 acquire 起手的陈旧锁清扫会自动做这些收尾(Home → 1 分钟 → 熄屏),所以多数情况不需要手动介入;也不要在没有用户确认时对所有设备批量重置。
 
-`release` 会主动把真机熄屏落锁(Android `KEYCODE_SLEEP`、鸿蒙 `power-shell suspend`),这是有意为之:测完的手机不该一直亮着停在解锁态。要保留亮屏就传 `release --no-lock`。模拟器不受影响(不熄屏、不关机)。
+## 测试后手机意外熄屏 / 回到桌面 / 锁屏了
+
+`release` 会先按 Home 退出被测 app(Android `KEYCODE_HOME`、鸿蒙 `uinput -K -d 1 -u 1`),再把真机熄屏落锁(Android `KEYCODE_SLEEP`、鸿蒙 `power-shell suspend`),这是有意为之:被测 app 常设「保持常亮」flag,留在前台手机就一直亮着耗电;测完的手机不该停在解锁态。要留在 app 界面亮屏继续看,就传 `release --no-lock`(Home 与熄屏都跳过)。模拟器不受影响(不按 Home、不熄屏、不关机)。
 
 ## 手动清理
 
@@ -143,8 +146,8 @@ python3 <skill根>/scripts/device_lock.py clean --all
 - offline / 卡死的模拟器串号计入内存配额(qemu 进程还活着就仍占内存);想释放配额先把它冷关掉。
 - 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。
 - 鸿蒙候选永远不需要启动,**不过内存闸门**;但已在跑的鸿蒙模拟器会计入闸门的运行中模拟器数(它也是 QEMU 虚拟机)。只有 `--platform` 里点了 harmony 时才去查(否则会为纯 Android 的 acquire 平白拉起 hdc 服务);`status` 只要装了 hdc 就会枚举。
-- 亮屏解锁、放宽超时、release 的还原与熄屏全程 fail-soft:任何一步失败都只写 stderr,acquire / wake / release 不会因此失败(release 恒 exit 0)。
-- 屏幕设置只改真机、只改一次:同一 type 的原值在锁 meta 里只记第一次,重复 acquire / wake 不会把原值污染成我们自己设的值。
+- 亮屏解锁、放宽超时、release 的 Home / 设置收尾 / 熄屏全程 fail-soft:任何一步失败都只写 stderr,acquire / wake / release 不会因此失败(release 恒 exit 0)。
+- 屏幕设置只改真机、只记一次:同一 type 在锁 meta 里只记第一次(`android_stayon` 的原值不会被重复 wake 污染成我们自己设的值;超时类不存原值,release 统一设 1 分钟)。
 - `--memory` 只在**需要启动**模拟器时才有意义:领到真机、或复用已经跑着的模拟器时无效(跑起来的 VM 改不了 RAM),此时结果 JSON 的 `memory_mb` 为 null。
 - `--memory` 只对本工具新建的 AVD 写 `config.ini`;启动用户自己的 AVD(如 Pixel_10)只覆盖本次运行,不改他们的配置。手动持久修改:改 `~/.android/avd/<名>.avd/config.ini` 的 `hw.ramSize`(纯数字按 MB 解释)。
 - 改了 RAM 的那次启动一定是冷启动(quickboot 快照要求 RAM 一致),acquire 会慢 1-2 分钟;之后维持同一值就能继续吃快照。

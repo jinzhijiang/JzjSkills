@@ -1,6 +1,6 @@
 ---
 name: test-device-allocator
-description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、iOS 和 HarmonyOS 真机或模拟器。任务要执行 Flutter run/drive、安装 app、UI 探查、截图点击或 E2E 验证时使用：先用 device_lock.py acquire 领设备，再把 device_id 显式传给每条 flutter -d、adb -s 或 hdc -t 命令，最后 release。支持优先空闲真机、复用或新建模拟器、多平台组合、宿主内存限流和 Android 模拟器 RAM 限制。acquire 会亮屏解锁，并把真机的自动锁屏时长临时放宽到 10 分钟，避免构建等空档里反复熄屏；release 时还原原值并把真机熄屏落锁，长时间无人值守才显式用 --keep-awake。也用于排查设备被占用、模拟器互相污染或卡死、内存不足、设备熄屏、屏幕黑屏点不动、测试中途频繁锁屏、测试后一直亮屏或不会自动锁屏。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器或用户手动调试自行选设备。
+description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、iOS 和 HarmonyOS 真机或模拟器。任务要执行 Flutter run/drive、安装 app、UI 探查、截图点击或 E2E 验证时使用：先用 device_lock.py acquire 领设备，再把 device_id 显式传给每条 flutter -d、adb -s 或 hdc -t 命令，当前步骤测完、没有紧接着要用设备的下一步就立即 release，不为「可能还要测」占着手机。支持优先空闲真机、复用或新建模拟器、多平台组合、宿主内存限流和 Android 模拟器 RAM 限制。acquire 会亮屏解锁，并把真机的自动锁屏时长临时放宽到 10 分钟，避免构建等空档里反复熄屏；release 收尾按 Home 退出被测 app（释放它的屏幕常亮 flag）、把自动锁屏统一设为 1 分钟再熄屏落锁，测完的手机不空耗电，长时间无人值守才显式用 --keep-awake。也用于排查设备被占用、模拟器互相污染或卡死、内存不足、设备熄屏、屏幕黑屏点不动、测试中途频繁锁屏、测试后一直亮屏或不会自动锁屏。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器或用户手动调试自行选设备。
 ---
 
 # 并发测试设备分配(device_lock)
@@ -15,6 +15,7 @@ description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、i
 - 禁止不带 `-d` 让 flutter 自动挑设备——它可能挑中别的会话正在用的那台。
 - 一个测试会话只 acquire 一台;同 owner+project 重复 acquire 幂等返回已持有的设备(`reused: true`),不会多占。
 - 测试结束(无论成败)都要 release。忘了也有 owner 进程死亡 / TTL 超时兜底回收,但不要依赖兜底。
+- **测完即放**:当前步骤的设备操作一结束,后面没有**紧接着**要用设备的步骤(比如接下来是改代码、分析日志、写报告),就立即 release,不要为「等会儿可能还要测」占着手机——真机占着就一直亮屏耗电,还挡住别的会话。之后真要再测,重新 acquire 即可:幂等、模拟器热复用,代价很低。只有连续多轮设备操作之间的短间隙才值得继续持有。
 - 锁是**协作约定**:只对同样走本 skill 的会话生效,拦不住绕过它的进程,所以所有项目的 AI 测试流程都必须从 acquire 开始。
 
 ## 平台选择(默认 Android)
@@ -54,7 +55,7 @@ description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、i
 |---|---|---|
 | `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
 | `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake` |
-| `release` | 释放锁(幂等,恒 exit 0);还原改过的屏幕设置并把真机熄屏落锁 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 释放后不熄屏 |
+| `release` | 释放锁(幂等,恒 exit 0);真机收尾:Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
 | `status` | 设备 × 锁全景(排查谁占了什么) | 无 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
 
@@ -83,14 +84,15 @@ flutter run -d "$DEVICE_ID"                     # 或 flutter_skill launch -d "$
 # 3. 真机自动锁屏已被放宽到 10 分钟;构建超长时可在截图/点击前再点亮一次
 python3 "$SKILL_DIR/scripts/device_lock.py" wake --key "$DEVICE_KEY"
 
-# 4. 测完释放(失败也要释放):还原锁屏时长并把真机熄屏落锁
+# 4. 测完立即释放(失败也要释放;没有紧接的下一步就别继续占着设备)
+#    真机收尾:Home 退出被测 app → 自动锁屏统一 1 分钟 → 熄屏落锁
 python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 ```
 
 - acquire 失败时 exit code 非 0,stdout JSON 带 `error/message/hint`:`NO_SYSTEM_IMAGE`(4)→ 按 hint 跑 sdkmanager 装镜像后重试;`BUSY`(7)→ 指定的设备被占,去掉 `--device` 让脚本另挑;`MEMORY_PRESSURE`(9)→ 宿主内存不够再开一台模拟器,优先真机/已运行设备或按 hint 释放内存。
 - fvm 项目按 flutter-use-fvm 规则把 `flutter` 换成 `fvm flutter`;`device_lock.py` 本身不经 fvm。
 
-## 亮屏解锁与自动锁屏时长(持锁期间放宽,release 还原)
+## 亮屏解锁与自动锁屏时长(持锁期间放宽,release 收尾归位)
 
 设备熄屏或停在锁屏时,自动化根本点不动:截图全黑、tap 落空、driver 找不到 widget。acquire 拿到设备后会自动做一次**唤醒 → 解锁**,**真机再把自动锁屏时长临时放宽到 10 分钟**——默认 1 分钟的手机在构建、pub get、drive 启动这些没有输入事件的空档里会反复熄屏落锁,每次都要重新唤醒。结果放在返回 JSON 的 `screen` 字段(`state` / `locked` / `actions` / `notes` / `restore`)。
 
@@ -101,10 +103,10 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | iOS 模拟器 | 不需要(不会熄屏,也没锁屏) | — | — | — |
 | iOS 真机 | 无法程序控制 | 无法程序解锁 | 不支持 | 不支持;UI 测试前手动解锁 |
 
-**release 收尾**:先还原自动锁屏时长,再把真机**熄屏落锁**(Android `input keyevent KEYCODE_SLEEP`、鸿蒙 `power-shell suspend`),测完的手机不会一直亮着停在解锁态。设备本身把锁屏设成「无」时,只会熄屏、不出现锁屏界面。
+**release 收尾(仅真机,依次三步)**:① **按 Home 退出被测 app**(Android `input keyevent KEYCODE_HOME`、鸿蒙 `uinput -K -d 1 -u 1`)——被测 app 常设「保持屏幕常亮」flag,留它在前台,自动锁屏会被一直顶住,哪怕先熄了屏、下次被点亮又常亮到底白白耗电;② 把自动锁屏时长**统一设为 1 分钟**(不回写原值——测试机的省电收尾常态,10 分钟的放宽值绝不留在设备上);③ **熄屏落锁**(Android `input keyevent KEYCODE_SLEEP`,回读仍亮再用 `KEYCODE_POWER` 兜底;鸿蒙 `power-shell suspend`),测完的手机不会一直亮着停在解锁态;个别 ROM 无视电源键注入,此时靠第②步的 1 分钟超时自动熄屏。设备本身把锁屏设成「无」时,只会熄屏、不出现锁屏界面。
 
 - **全程尽力而为**:任何一步失败都只记 stderr 日志,不会让 acquire / release 失败。
-- **原值只记第一次**:改过的设置进锁 meta 的 `screen_restore`(列表),重复 acquire / wake 不会把"原值"覆写成我们自己设的值。`release` / 陈旧锁回收 / `clean` 都会还原,原值读不到时按 **1 分钟**兜底。鸿蒙用 `power-shell timeout -r` 交还系统设置(它的 OverrideTimeout 是系统托管的瞬态值,不能当用户原值回写)。
+- **改过才收尾**:放宽过超时的设备记进锁 meta 的 `screen_restore`(列表,同一 type 只记第一次)。`release` / 陈旧锁回收 / `clean` 走同一套收尾:Android 自动锁屏统一设 1 分钟;鸿蒙用 `power-shell timeout -r` 撤销瞬态覆盖、交还系统设置(它的 OverrideTimeout 是系统托管的,没有可回写的持久时长);`--keep-awake` 设过的 `stay_on_while_plugged_in` 仍按原值还原。acquire 传过 `--screen-timeout 0` / `--no-wake` 就没有设置收尾债,但 release 默认仍会 Home + 熄屏(`--no-lock` 才跳过)。
 - **模拟器不改设置**:模拟器熄屏不影响 adb/hdc 操作,不值得为它留还原债;`release` 也不给它熄屏,留着让下个会话热复用。
 - 设了 **PIN / 图案 / 密码**的真机系统不允许程序解锁,`screen.locked` 会是 `true` 并给出提示,此时需要人手解一次。
 - 10 分钟仍不够(超长构建)时,完成后、开始 UI 交互前调一次 `wake --key "$DEVICE_KEY"`;交互中的点击会继续刷新系统计时。改时长用 `--screen-timeout <分钟>`,`0` = 完全不碰设备设置。
@@ -137,8 +139,8 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
 | 截图全黑 / 点击没反应 / driver 找不到 widget | 真机持锁期间自动锁屏已放宽到 10 分钟;更长的构建后跑 `wake --key $DEVICE_KEY` 再点亮;`screen.locked=true` 说明设了 PIN,需人工解一次 |
-| 测试后手机一直亮屏 / 不会自动锁屏 | 正常路径下 `release` 会还原时长并熄屏。若会话崩在半路:`adb -s <id> shell settings get system screen_off_timeout` 查(`600000` 即为遗留的放宽值,改回 `60000`);`stay_on_while_plugged_in=7` 是 `--keep-awake` 遗留,改回 `0`。下次 acquire 起手的陈旧锁回收也会自动还原 |
-| 测试后手机意外熄屏了 | `release` 现在会主动熄屏落锁;不想要就传 `release --no-lock` |
+| 测试后手机一直亮屏 / 不会自动锁屏 | 正常路径下 `release` 会按 Home 退出 app、把自动锁屏设为 1 分钟并熄屏。若会话崩在半路:被测 app 若还在前台,先 `adb -s <id> shell input keyevent KEYCODE_HOME`(app 的常亮 flag 会顶住自动锁屏);`settings get system screen_off_timeout` 查(`600000` 即为遗留的放宽值,改回 `60000`);`stay_on_while_plugged_in=7` 是 `--keep-awake` 遗留,改回 `0`。下次 acquire 起手的陈旧锁回收也会自动收尾 |
+| 测试后手机意外熄屏了 / 回到了桌面 | `release` 的正常收尾就是 Home 退出 app → 熄屏落锁;想留在 app 界面继续看就传 `release --no-lock` |
 | 鸿蒙设备不参与分配 | 只有 `hdc list targets -v` 里 **Connected** 的目标才算;还要显式 `--platform harmony` 或 `android,harmony`(`any` 不含鸿蒙) |
 | exit 6 `ENV_MISSING` 且提到 hdc | 没装 DevEco Studio,或 hdc 不在常见位置:设 `HDC_PATH` 指向 hdc 可执行文件 |
 | 忘了 release / 会话崩了 | 下次任意 acquire 起手全局回收死 pid / 超 TTL 的锁;不放心跑 `clean` |

@@ -27,7 +27,9 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-ALLOCATOR_VERSION = 3          # 3: screen_restore 由单个 dict 改为 dict 列表(读取向下兼容)
+ALLOCATOR_VERSION = 4          # 4: release 收尾改为 Home→统一 1 分钟→熄屏(不再回写原值,
+                               #    screen_restore 里 android_screen_off_timeout 不再需要 prev;
+                               #    3: screen_restore 由单个 dict 改为 dict 列表。读取均向下兼容)
 DEFAULT_TTL_HOURS = 8.0
 CMD_TIMEOUT = 15               # 单条外部命令默认超时(秒)
 AVD_NAME_TIMEOUT = 10
@@ -44,15 +46,16 @@ HDC_TIMEOUT = 20               # hdc list targets 等外部命令超时
 # 亮屏解锁:设备熄屏/锁屏时自动化点不动屏幕,acquire 完成后统一做一次(--no-wake 关闭)。
 # 真机额外把自动锁屏时长临时放宽到 SCREEN_OFF_DEFAULT_MIN 分钟(--screen-timeout 调整
 # / 0 关闭):默认 1 分钟的手机在构建、pub get、drive 启动这些空档里反复熄屏落锁,
-# 每次都要重新唤醒解锁。放宽的原值记进锁的 screen_restore,release / 回收陈旧锁时还原,
-# 并顺手熄屏落锁——设备不会因为测过一轮就一直亮着或停在解锁态。
+# 每次都要重新唤醒解锁。放宽过的设备记进锁的 screen_restore,release / 回收陈旧锁时收尾:
+# 先按 Home 退出被测 app(它常设「保持屏幕常亮」flag,留在前台会顶住熄屏,手机一直亮着耗电),
+# 再把自动锁屏统一设为 1 分钟(不回写原值——测试机的省电收尾常态),最后熄屏落锁。
 # 常亮(--keep-awake)是另一回事:那是彻底不熄屏,只在长时间无人值守时显式开。
 # 每一步都是尽力而为——失败只记日志,绝不让 acquire 失败。
 WAKE_CMD_TIMEOUT = 15
-RESTORE_TIMEOUT = 8            # release 时还原屏幕设置的短超时(设备可能已拔线)
+RESTORE_TIMEOUT = 8            # release 时收尾屏幕设置的短超时(设备可能已拔线)
 KEEP_AWAKE_MS = 1800000        # HarmonyOS 屏幕超时覆盖值(30 分钟)
 SCREEN_OFF_DEFAULT_MIN = 10    # 持锁期间真机的自动锁屏时长(分钟)
-SCREEN_OFF_FALLBACK_MS = 60000  # 读不到原值时,release 兜底还原成 1 分钟
+SCREEN_OFF_RELEASE_MS = 60000  # release 收尾统一设的自动锁屏时长(1 分钟,不回写原值)
 HARMONY_LOCK_WINDOW = "SCBScreenLock"   # hidumper WMS 里的锁屏窗口名前缀
 HARMONY_DEFAULT_SCREEN = (1080, 2340)   # 读不到分辨率时的上滑兜底坐标基准
 
@@ -574,15 +577,22 @@ def reclaim_path(path):
 
 
 def release_lock(key, lock_screen_after=True):
-    """还锁 → 还原改过的屏幕设置 → 真机熄屏落锁(后两步尽力而为,失败不影响还锁)。"""
+    """还锁 → Home 退出被测 app → 屏幕设置收尾(自动锁屏统一 1 分钟) → 真机熄屏落锁。
+
+    设备侧三步都是尽力而为,失败不影响还锁。--no-lock 跳过 Home 与熄屏(收尾照做):
+    传它的人是想留在当前界面继续看,不能替人家把 app 退掉。
+    """
     d = lock_dir(key)
     if not os.path.isdir(d):
         return False
     meta = read_meta(d)
     if not reclaim_path(d):
         return False
-    if restore_screen(meta):
-        log(f"{key}: 已还原屏幕设置(自动锁屏时长)")
+    if lock_screen_after and press_home(meta):
+        log(f"{key}: 已按 Home 退出前台 app(释放它的屏幕常亮)")
+    done = restore_screen(meta)
+    if done:
+        log(f"{key}: 屏幕设置已收尾({', '.join(done)})")
     if lock_screen_after and lock_screen(meta):
         log(f"{key}: 已熄屏落锁")
     return True
@@ -649,7 +659,8 @@ def sweep_stale_locks():
         state, reason = eval_lock(path, meta)
         if state == "STALE" and reclaim_path(path):
             removed.append(f"{(meta or {}).get('device_key', dirname)}({reason})")
-            restore_screen(meta)   # 会话崩了也别把人家手机永久留在放宽/常亮状态
+            press_home(meta)       # 会话崩了也别把人家手机永久留在放宽/常亮状态
+            restore_screen(meta)
             lock_screen(meta)
     if removed:
         log(f"回收陈旧锁: {', '.join(removed)}")
@@ -884,8 +895,9 @@ def ios_physicals(warnings):
 #
 # 设备熄屏 / 停在锁屏时,自动化测试点不动屏幕(截图全黑、tap 落空、flutter_driver
 # 找不到 widget)。acquire 拿到设备后统一走一次唤醒 → 解锁 → 真机放宽自动锁屏时长。
-# 改过的设备设置都记进锁的 meta(screen_restore,按 type 只记第一次的原值),
-# release / 回收陈旧锁时还原。长时间构建后仍可再调 wake 补一次唤醒。
+# 改过的设备设置都记进锁的 meta(screen_restore,按 type 只记第一次),release /
+# 回收陈旧锁时收尾:Home 退出 app → 自动锁屏统一 1 分钟 → 熄屏落锁。
+# 长时间构建后仍可再调 wake 补一次唤醒。
 # 设了 PIN / 图案 / 密码的真机无法程序解锁(系统限制),此时只提示、不报错。
 
 
@@ -926,17 +938,21 @@ def add_restore(info, entry):
 
 
 def set_android_screen_off(adb, serial, ms, info):
-    """把自动锁屏时长临时放宽到 ms;原值进 restore,读不到则记 None(还原走兜底值)。"""
+    """把自动锁屏时长临时放宽到 ms;记一条 restore,release 收尾统一改回 1 分钟。
+
+    不存原值:收尾不回写原值,而是统一设 SCREEN_OFF_RELEASE_MS(1 分钟)——测试机
+    测完就该省电落锁,把 10/30 分钟的原值写回去,手机测完还是会亮很久。
+    当前已是目标值(本会话前一次 wake 设的,或上个会话崩了留下的)也照记,收尾一并归位。
+    """
     prev = android_setting(adb, serial, "system", "screen_off_timeout")
-    if prev == str(ms):
-        return                       # 已经是目标值(多半是本会话前一次 wake 设的),别把它当原值记下来
-    rc, _, _ = run([adb, "-s", serial, "shell", "settings", "put", "system",
-                    "screen_off_timeout", str(ms)], timeout=WAKE_CMD_TIMEOUT)
-    if rc != 0:
-        info["notes"].append("改不动 screen_off_timeout,测试中途可能仍会熄屏(可再调 wake)")
-        return
-    info["actions"].append(f"screen_off_timeout={ms}ms")
-    add_restore(info, {"type": "android_screen_off_timeout", "prev": prev})
+    if prev != str(ms):
+        rc, _, _ = run([adb, "-s", serial, "shell", "settings", "put", "system",
+                        "screen_off_timeout", str(ms)], timeout=WAKE_CMD_TIMEOUT)
+        if rc != 0:
+            info["notes"].append("改不动 screen_off_timeout,测试中途可能仍会熄屏(可再调 wake)")
+            return
+        info["actions"].append(f"screen_off_timeout={ms}ms")
+    add_restore(info, {"type": "android_screen_off_timeout"})
 
 
 def wake_android(adb, serial, keep_awake, screen_off_ms=None):
@@ -1061,7 +1077,7 @@ def wake_device(platform_, kind, device_id, keep_awake=False, screen_off_ms=None
     """亮屏 + 解锁 + (真机)放宽自动锁屏时长,返回可直接塞进结果 JSON 的 dict。
 
     放宽超时只对真机做:模拟器熄屏不影响自动化(adb/hdc 仍能点亮),而改设置要在
-    release 时还原,给一台随时可能被删掉的模拟器留还原债不划算。
+    release 时收尾,给一台随时可能被删掉的模拟器留收尾债不划算。
     """
     if not device_id:
         return {"attempted": False, "reason": "no_device_id"}
@@ -1105,10 +1121,11 @@ def as_restore_list(value):
 
 
 def record_screen_restore(key, screen):
-    """把待还原的原值记进锁,同一 type **只记第一次**。
+    """把待收尾的设置项记进锁,同一 type **只记第一次**。
 
-    重复 wake(测试中途反复熄屏)时若覆写,第二次读到的"原值"已经是我们自己设的
-    常亮 / 放宽值,release 就会把设备永久留在那个状态。
+    android_stayon 带原值(prev):重复 wake 时若覆写,第二次读到的"原值"已经是
+    我们自己设的常亮值,release 会把设备永久留在常亮。其余 type 不带原值,只是
+    「改过、release 要收尾」的标记,去重顺便防列表膨胀。
     """
     entries = as_restore_list((screen or {}).get("restore"))
     if not entries or not key:
@@ -1124,16 +1141,17 @@ def record_screen_restore(key, screen):
 
 
 def restore_one(dev, entry):
-    """还原一条设备设置,返回已还原的 type(失败返回 None)。"""
+    """收尾一条设备设置,返回已处理的 type(失败返回 None)。"""
     kind = entry.get("type")
     if kind == "android_screen_off_timeout":
         adb = tool("adb")
         if not adb:
             return None
-        # 原值读不到时按 1 分钟兜底,总之不能把「测试期放宽」留成设备的常态
-        prev = entry.get("prev") or SCREEN_OFF_FALLBACK_MS
+        # 不回写原值(旧版锁 meta 里的 prev 忽略):统一设为 1 分钟,测完的手机
+        # 尽快自动落锁省电,「测试期放宽」也绝不留成设备常态
         rc, _, _ = run([adb, "-s", dev, "shell", "settings", "put", "system",
-                        "screen_off_timeout", str(prev)], timeout=RESTORE_TIMEOUT)
+                        "screen_off_timeout", str(SCREEN_OFF_RELEASE_MS)],
+                       timeout=RESTORE_TIMEOUT)
         return kind if rc == 0 else None
     if kind == "android_stayon":
         adb = tool("adb")
@@ -1157,7 +1175,11 @@ def restore_one(dev, entry):
 
 
 def restore_screen(meta):
-    """release / 回收陈旧锁时还原改过的屏幕设置(尽力而为),返回已还原的 type 列表。"""
+    """release / 回收陈旧锁时收尾改过的屏幕设置(尽力而为),返回已处理的 type 列表。
+
+    Android 自动锁屏统一设为 1 分钟;鸿蒙撤销超时覆盖交还系统设置;
+    --keep-awake 设过的 stay_on_while_plugged_in 按原值还原。
+    """
     dev = (meta or {}).get("device_id")
     entries = as_restore_list((meta or {}).get("screen_restore"))
     if not dev or not entries:
@@ -1170,6 +1192,46 @@ def restore_screen(meta):
         except Exception:  # noqa: BLE001
             pass
     return done
+
+
+def press_home(meta):
+    """release 收尾第一步:按 Home 把被测 app 退到桌面(仅真机)。
+
+    被测 app 常设「保持屏幕常亮」flag(Android FLAG_KEEP_SCREEN_ON / ArkUI
+    setWindowKeepScreenOn),留它在前台,自动锁屏会被一直顶住;哪怕先强制熄了屏,
+    下次被通知/充电点亮又常亮到底,白白耗电。回桌面即释放该 flag。
+    模拟器不做(没有电池,下个会话还要热复用)。返回平台名,没做/失败返回 None。
+    """
+    dev = (meta or {}).get("device_id")
+    plat = (meta or {}).get("platform")
+    if not dev or (meta or {}).get("kind") != "physical":
+        return None
+    try:
+        rc = 1
+        if plat == "android":
+            adb = tool("adb")
+            if not adb:
+                return None
+            rc, _, _ = run([adb, "-s", dev, "shell", "input", "keyevent",
+                            "KEYCODE_HOME"], timeout=RESTORE_TIMEOUT)
+        elif plat == "harmony":
+            hdc = hdc_tool()
+            if not hdc:
+                return None
+            # uinput 键码 1 = KEYCODE_HOME(与解锁上滑同一注入工具);不行再试 uitest
+            rc, _, _ = run([hdc, "-t", dev, "shell", "uinput", "-K", "-d", "1",
+                            "-u", "1"], timeout=RESTORE_TIMEOUT)
+            if rc != 0:
+                rc, _, _ = run([hdc, "-t", dev, "shell", "uitest", "uiInput",
+                                "keyEvent", "Home"], timeout=WAKE_CMD_TIMEOUT)
+        else:
+            return None              # iOS 真机没有可用的程序按键通道
+        if rc == 0:
+            time.sleep(0.5)          # 等回桌面的转场完成,再动设置/熄屏
+            return plat
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def lock_screen(meta):
@@ -1188,10 +1250,21 @@ def lock_screen(meta):
             if not adb:
                 return None
             # KEYCODE_SLEEP 是幂等的:已熄屏再发一次仍是熄屏。
-            # KEYCODE_POWER 是开关型,屏幕已灭时会把它重新点亮,不能用。
-            rc, _, _ = run([adb, "-s", dev, "shell", "input", "keyevent", "KEYCODE_SLEEP"],
-                           timeout=RESTORE_TIMEOUT)
-            return "android" if rc == 0 else None
+            # KEYCODE_POWER 是开关型,屏幕已灭时会把它重新点亮——只在回读确认仍
+            # Awake(说明这台 ROM 无视了 SLEEP 注入,如 Lineage/polaris)时才用它兜底。
+            run([adb, "-s", dev, "shell", "input", "keyevent", "KEYCODE_SLEEP"],
+                timeout=RESTORE_TIMEOUT)
+            time.sleep(1)
+            state = android_power_state(adb, dev)
+            if state != "awake":     # asleep / dozing / 读不到(无从判断,不敢再按 POWER)
+                return "android" if state else None
+            run([adb, "-s", dev, "shell", "input", "keyevent", "KEYCODE_POWER"],
+                timeout=RESTORE_TIMEOUT)
+            time.sleep(1)
+            if android_power_state(adb, dev) != "awake":
+                return "android"
+            log(f"{dev}: SLEEP/POWER 键注入均被 ROM 忽略,依赖 1 分钟自动锁屏兜底熄屏")
+            return None
         if plat == "harmony":
             hdc = hdc_tool()
             if not hdc:
@@ -2007,6 +2080,7 @@ def cmd_clean(args):
             stale = state == "STALE"
         if stale and reclaim_path(path):
             removed.append(label)
+            press_home(meta)
             restore_screen(meta)
             lock_screen(meta)
         else:
@@ -2051,7 +2125,8 @@ def main():
     a.add_argument("--screen-timeout", type=float, metavar="分钟",
                    default=SCREEN_OFF_DEFAULT_MIN,
                    help=f"持锁期间真机的自动锁屏时长(分钟,默认 {SCREEN_OFF_DEFAULT_MIN};"
-                        "0=不改设备设置)。release 时还原原值并熄屏落锁;模拟器不受影响")
+                        "0=不改设备设置)。release 收尾:Home 退出 app → 自动锁屏统一"
+                        "设为 1 分钟 → 熄屏落锁;模拟器不受影响")
     ak = a.add_mutually_exclusive_group()
     ak.add_argument("--keep-awake", action="store_true",
                     help="显式在持锁期间临时常亮(比 --screen-timeout 更进一步:完全不熄屏;"
@@ -2086,7 +2161,8 @@ def main():
     g.add_argument("--all-mine", action="store_true", help="释放本会话持有的全部锁")
     r.add_argument("--owner", type=int, help="配合 --all-mine(默认取会话进程)")
     r.add_argument("--no-lock", action="store_true",
-                   help="释放后不熄屏落锁(默认会把真机熄屏,让它回到锁屏态)")
+                   help="释放后不按 Home、不熄屏落锁(默认会先 Home 退出被测 app 再熄屏;"
+                        "想留在当前界面继续看时用)")
 
     sub.add_parser("status", help="设备 × 锁全景")
 
