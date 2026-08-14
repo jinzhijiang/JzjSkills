@@ -23,7 +23,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ## meta.json 字段
 
-`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(待收尾的设备设置列表,如 `[{"type":"android_screen_off_timeout"}]`;没改过任何设置时不写该字段。`android_screen_off_timeout` / `harmony_timeout` 只是「改过、release 要收尾」的标记,不存原值——release 统一设 1 分钟 / 撤销覆盖;`android_stayon` 仍带 `prev` 原值。旧锁兼容:`allocator_version` ≤ 2 是单个 dict,≤ 3 的 `android_screen_off_timeout` 带 `prev`,读取时都兼容、`prev` 忽略)。
+`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(待收尾的设备设置列表,如 `[{"type":"android_screen_off_timeout"}]`;没改过任何设置时不写该字段。三种 type(`android_screen_off_timeout` / `android_stayon` / `harmony_timeout`)都只是「改过、release 要收尾」的标记,一律不存原值——release 统一设 1 分钟 / 统一关常亮 / 撤销覆盖。旧锁兼容:`allocator_version` ≤ 2 是单个 dict,≤ 3 的 `android_screen_off_timeout`、≤ 4 的 `android_stayon` 带 `prev`,读取时都兼容、`prev` 一律忽略)。
 
 ## 陈旧(stale)判定
 
@@ -51,7 +51,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `--mem-override` | 关 | 跳过内存闸门(等效环境变量 `AI_DEVICE_MEM_OVERRIDE=1`) |
 | `--no-wake` | 关 | 不做亮屏解锁,也不改自动锁屏时长(默认会唤醒并尝试解锁分配到的设备) |
 | `--screen-timeout <分钟>` | 10 | 持锁期间**真机**的自动锁屏时长;改动记进锁 meta,release 收尾统一设回 1 分钟(不回写原值)。`0` = 完全不碰设备设置(release 也不碰,但仍会 Home + 熄屏)。模拟器恒不改 |
-| `--keep-awake` | 关 | 长时间无人值守测试时,显式在持锁期间临时常亮(比放宽超时更进一步:完全不熄屏);release 时尽力还原 |
+| `--keep-awake` | 关 | 长时间无人值守测试时,显式在持锁期间临时常亮(比放宽超时更进一步:完全不熄屏);release 收尾统一关掉常亮(写 `stay_on_while_plugged_in=0`,不回写原值) |
 
 分配优先级(tier 间严格有序,tier 内先按 `--platform` 所列平台顺序、再按各平台的确定性排序):
 
@@ -138,14 +138,14 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 | 平台 | 唤醒 | 状态判定 | 解锁 | 放宽自动锁屏(默认 10 分钟) | 显式 `--keep-awake` |
 |---|---|---|---|---|---|
-| Android | `input keyevent KEYCODE_WAKEUP`(只唤醒,不会像 KEYCODE_POWER 那样按灭) | `dumpsys power` 的 `mWakefulness=`;`dumpsys window` 的 `isKeyguardShowing` / `mDreamingLockscreen` / `mShowingLockscreen`(设备侧 grep,不回传整份 dump) | `wm dismiss-keyguard` | 先读 `settings get system screen_off_timeout` 存原值,再 `settings put system screen_off_timeout 600000` | 另加 `svc power stayon true`(先存 `stay_on_while_plugged_in` 原值) |
+| Android | `input keyevent KEYCODE_WAKEUP`(只唤醒,不会像 KEYCODE_POWER 那样按灭) | `dumpsys power` 的 `mWakefulness=`;`dumpsys window` 的 `isKeyguardShowing` / `mDreamingLockscreen` / `mShowingLockscreen`(设备侧 grep,不回传整份 dump) | `wm dismiss-keyguard` | 先读 `settings get system screen_off_timeout` 存原值,再 `settings put system screen_off_timeout 600000` | 另加 `svc power stayon true`(不存原值,release 统一写回 `0`) |
 | HarmonyOS | `power-shell wakeup` | `hidumper -s PowerManagerService -a -s` 的 `Current State:`;锁屏看 `hidumper -s WindowManagerService -a -a` 可见段里有没有 `SCBScreenLock*` | 可见段仍有锁屏窗口 → `uinput -T -m` 上滑(坐标按 dump 里最大窗口 rect 推算,读不到用 1080×2340 兜底) | `power-shell timeout -o 600000` | 同一旋钮,改用 `-o 1800000`(不叠加第二条 restore) |
 | iOS 模拟器 | — | — | — | — | 不适用(`attempted:false`,`reason: ios_simulator_no_lockscreen`) |
 | iOS 真机 | — | — | 系统不允许 | 不支持 | 不适用(`reason: ios_physical_manual_unlock`,notes 提示手动解锁 + 自动锁定设「永不」) |
 
 - `screen.locked`:`true`=仍锁着(多半有 PIN/图案/密码,系统禁止程序解锁,notes 会写明)、`false`=已解锁、`null`=判不出。
 - **全程 fail-soft**:每一步失败只写 stderr,`safe_wake` 兜住所有异常,acquire 不会因亮屏失败而失败。改不动屏幕超时时只往 `notes` 写一句。
-- `restore` 是**列表**,每改一项设置追加一条(`android_screen_off_timeout` / `android_stayon` / `harmony_timeout`),写进锁 meta 的 `screen_restore`。同一 type **只记第一次**——`android_stayon` 带原值,重复 `wake` 时覆写会把「原值」变成我们自己设的常亮值;其余 type 去重防列表膨胀。
+- `restore` 是**列表**,每改一项设置追加一条(`android_screen_off_timeout` / `android_stayon` / `harmony_timeout`),写进锁 meta 的 `screen_restore`。同一 type **只记第一次**,纯粹防重复 `wake` 把列表撑大——v5 起没有任何 type 带原值,收尾一律写成省电常态。(v4 之前 `android_stayon` 带 `prev`,重复 `wake` 覆写会把「原值」变成我们自己设的常亮值,收尾反而把设备永久留在常亮;现在既不存也不回写。)
 - Android 侧若当前值已等于目标值(本会话前一次 wake 设的,或上个会话崩了遗留的 600000)不再重复 put,但**照记 restore**,release 收尾一并归位成 1 分钟。
 - 超时类不存原值。Android:release 统一设 1 分钟,不回写原值(测试机的省电收尾常态)。鸿蒙:`OverrideTimeout` 是系统托管的瞬态覆盖(设备一进 SLEEP,系统自己会挂一个 10000ms 的 override),回写它会让醒着的设备 10 秒就熄屏;release 恒用 `power-shell timeout -r` 交还系统设置(鸿蒙没有可写的持久时长旋钮)。
 - `--no-wake` 完全不碰设备;`--screen-timeout 0` 只唤醒解锁、不改超时。旧版 `--no-keep-awake` 仍可接受。

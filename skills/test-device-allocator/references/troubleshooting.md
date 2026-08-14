@@ -75,13 +75,31 @@ hdc -t <id> shell power-shell timeout -o 600000        # 撤销用 timeout -r,�
 adb -s <id> shell input keyevent KEYCODE_HOME                   # 被测 app 常设「保持常亮」flag,留在前台会顶住自动锁屏
 adb -s <id> shell settings get system screen_off_timeout        # 600000 = 遗留的放宽值
 adb -s <id> shell settings put system screen_off_timeout 60000  # 改回 1 分钟(release 的统一收尾值)
-adb -s <id> shell settings get global stay_on_while_plugged_in  # 7 = --keep-awake 遗留的常亮
+adb -s <id> shell settings get global stay_on_while_plugged_in  # 7 = 常亮(开发者选项「充电时保持唤醒状态」或 --keep-awake 遗留)
 adb -s <id> shell settings put global stay_on_while_plugged_in 0
 ```
 
-`dumpsys power` 里的 `mStayOn=true` 同样指向常亮。鸿蒙查 `hidumper -s PowerManagerService -a -s` 的 `OverrideTimeout`,撤销用 `hdc -t <id> shell power-shell timeout -r`——注意设备进入 SLEEP 后系统自己会挂一个 `OverrideTimeout=10000ms`,那是正常的,不用管。
+`dumpsys power` 里的 `mStayOn=true` 同样指向常亮:**插着 USB 就永不熄屏**,`screen_off_timeout` 被完全架空(`mLastUserActivityTime` 是几十分钟前、无 wakelock、前台是桌面,屏幕却一直 Awake,就是这个)。v5 起 release 会无条件把它写回 `0`,但只对本 skill 自己设过常亮的锁生效;设备上手动开的开发者选项、或 v4 之前遗留下来的 `7`,仍要按上面手动清一次。鸿蒙查 `hidumper -s PowerManagerService -a -s` 的 `OverrideTimeout`,撤销用 `hdc -t <id> shell power-shell timeout -r`——注意设备进入 SLEEP 后系统自己会挂一个 `OverrideTimeout=10000ms`,那是正常的,不用管。
 
-个别第三方 ROM(实测 Lineage 22 / polaris)会无视 `KEYCODE_SLEEP`、`KEYCODE_POWER` 等一切电源键注入,甚至自动超时策略也不生效(`mScreenOffTimeoutSetting=60000`、无 wakelock、前台是桌面,却一直 Awake)。release 会在两种按键都确认无效后写一条 stderr 日志;这种设备只能人手按物理电源键熄屏,好在 release 的 Home 已把持常亮 flag 的被测 app 退出了前台,不会再被它顶住。
+## 熄屏成功了却几秒后又自己亮起来(USB 供电抖动)
+
+和上面「一直亮屏」是两回事:这里 `KEYCODE_SLEEP` 生效了(回读能看到 `mWakefulness=Dozing/Asleep`、`mScreenState=OFF`),但几秒到几十秒后屏幕又亮,而且反复发生。抓一条唤醒日志就能确认:
+
+```bash
+adb -s <id> logcat -d | grep -i "Waking up"
+# Waking up from Dozing (uid=1000, reason=WAKE_REASON_PLUGGED_IN, details=android.server.power:PLUGGED:false)
+adb -s <id> shell dumpsys battery | grep -E "AC powered|USB powered|status"
+# AC powered: true / USB powered: false 这类自相矛盾或来回跳变 = 供电识别在抖
+```
+
+原因是数据线 / USB hub / 接口供电不稳,系统每次都当成一次插拔,而 Android 默认「插拔电源点亮屏幕」。每次唤醒还会顺带重置 user activity 计时,1 分钟自动锁屏永远从头数,看着就像永不熄屏。两个办法:
+
+```bash
+# 治本但会永久改设备行为(本 skill 不碰它,也就不会替你还原,改了自己记着)
+adb -s <id> shell settings put global wake_when_plugged_or_unplugged 0
+```
+
+或者换根线 / 换个 USB 口。release 会在 `KEYCODE_SLEEP`、`KEYCODE_POWER` 两次注入后仍读到 Awake 时写一条 stderr 日志——那既可能是 ROM 无视电源键,也可能是这里的反复唤醒,按上面的日志区分。好在 release 的 Home 已把持常亮 flag 的被测 app 退出了前台,不会再被它顶住。
 
 下次任意 acquire 起手的陈旧锁清扫会自动做这些收尾(Home → 1 分钟 → 熄屏),所以多数情况不需要手动介入;也不要在没有用户确认时对所有设备批量重置。
 
@@ -147,7 +165,7 @@ python3 <skill根>/scripts/device_lock.py clean --all
 - 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。
 - 鸿蒙候选永远不需要启动,**不过内存闸门**;但已在跑的鸿蒙模拟器会计入闸门的运行中模拟器数(它也是 QEMU 虚拟机)。只有 `--platform` 里点了 harmony 时才去查(否则会为纯 Android 的 acquire 平白拉起 hdc 服务);`status` 只要装了 hdc 就会枚举。
 - 亮屏解锁、放宽超时、release 的 Home / 设置收尾 / 熄屏全程 fail-soft:任何一步失败都只写 stderr,acquire / wake / release 不会因此失败(release 恒 exit 0)。
-- 屏幕设置只改真机、只记一次:同一 type 在锁 meta 里只记第一次(`android_stayon` 的原值不会被重复 wake 污染成我们自己设的值;超时类不存原值,release 统一设 1 分钟)。
+- 屏幕设置只改真机、只记一次:同一 type 在锁 meta 里只记第一次(防重复 wake 撑大列表)。三种 type 都不存原值,release 一律写成省电常态:自动锁屏 1 分钟、常亮关掉、鸿蒙撤销超时覆盖。
 - `--memory` 只在**需要启动**模拟器时才有意义:领到真机、或复用已经跑着的模拟器时无效(跑起来的 VM 改不了 RAM),此时结果 JSON 的 `memory_mb` 为 null。
 - `--memory` 只对本工具新建的 AVD 写 `config.ini`;启动用户自己的 AVD(如 Pixel_10)只覆盖本次运行,不改他们的配置。手动持久修改:改 `~/.android/avd/<名>.avd/config.ini` 的 `hw.ramSize`(纯数字按 MB 解释)。
 - 改了 RAM 的那次启动一定是冷启动(quickboot 快照要求 RAM 一致),acquire 会慢 1-2 分钟;之后维持同一值就能继续吃快照。

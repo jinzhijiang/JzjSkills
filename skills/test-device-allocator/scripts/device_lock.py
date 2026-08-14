@@ -27,7 +27,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-ALLOCATOR_VERSION = 4          # 4: release 收尾改为 Home→统一 1 分钟→熄屏(不再回写原值,
+ALLOCATOR_VERSION = 5          # 5: android_stayon 收尾也不再回写原值,统一关掉常亮;
+                               #    4: release 收尾改为 Home→统一 1 分钟→熄屏(不再回写原值,
                                #    screen_restore 里 android_screen_off_timeout 不再需要 prev;
                                #    3: screen_restore 由单个 dict 改为 dict 列表。读取均向下兼容)
 DEFAULT_TTL_HOURS = 8.0
@@ -56,6 +57,7 @@ RESTORE_TIMEOUT = 8            # release 时收尾屏幕设置的短超时(设�
 KEEP_AWAKE_MS = 1800000        # HarmonyOS 屏幕超时覆盖值(30 分钟)
 SCREEN_OFF_DEFAULT_MIN = 10    # 持锁期间真机的自动锁屏时长(分钟)
 SCREEN_OFF_RELEASE_MS = 60000  # release 收尾统一设的自动锁屏时长(1 分钟,不回写原值)
+STAY_ON_RELEASE = 0            # release 收尾统一写回的 stay_on_while_plugged_in(0=关,不回写原值)
 HARMONY_LOCK_WINDOW = "SCBScreenLock"   # hidumper WMS 里的锁屏窗口名前缀
 HARMONY_DEFAULT_SCREEN = (1080, 2340)   # 读不到分辨率时的上滑兜底坐标基准
 
@@ -978,14 +980,14 @@ def wake_android(adb, serial, keep_awake, screen_off_ms=None):
     if screen_off_ms:
         set_android_screen_off(adb, serial, screen_off_ms, info)
     if keep_awake:
-        # stayon 只在充电时生效,和 screen_off_timeout 是两个独立开关,可同时设
-        prev = android_setting(adb, serial, "global", "stay_on_while_plugged_in")
+        # stayon 只在充电时生效,和 screen_off_timeout 是两个独立开关,可同时设。
+        # 不存原值:收尾统一关掉(见 restore_one),所以设成功就无条件记 restore——
+        # 旧版「读不到原值就不记」会让设成的常亮没人收尾,永久留在设备上。
         rc, _, _ = run([adb, "-s", serial, "shell", "svc", "power", "stayon", "true"],
                        timeout=WAKE_CMD_TIMEOUT)
         if rc == 0:
             info["actions"].append("svc power stayon true")
-            if prev is not None:
-                add_restore(info, {"type": "android_stayon", "prev": prev})
+            add_restore(info, {"type": "android_stayon"})
     info["state"] = android_power_state(adb, serial)
     return info
 
@@ -1123,9 +1125,10 @@ def as_restore_list(value):
 def record_screen_restore(key, screen):
     """把待收尾的设置项记进锁,同一 type **只记第一次**。
 
-    android_stayon 带原值(prev):重复 wake 时若覆写,第二次读到的"原值"已经是
-    我们自己设的常亮值,release 会把设备永久留在常亮。其余 type 不带原值,只是
-    「改过、release 要收尾」的标记,去重顺便防列表膨胀。
+    v5 起所有 type 都不带原值,只是「改过、release 要收尾」的标记——收尾一律写成
+    省电常态(自动锁屏 1 分钟、常亮关掉),去重纯粹防重复 wake 把列表撑大。
+    (v4 之前 android_stayon 带 prev,重复 wake 覆写会把「原值」变成我们自己设的
+    常亮值,收尾反而把设备永久留在常亮;读旧锁时 prev 一律忽略。)
     """
     entries = as_restore_list((screen or {}).get("restore"))
     if not entries or not key:
@@ -1157,8 +1160,12 @@ def restore_one(dev, entry):
         adb = tool("adb")
         if not adb:
             return None
+        # 同样不回写原值(旧锁 meta 里的 prev 忽略):统一关掉「充电时保持唤醒」。
+        # 回写 prev 会自锁死——设备上一旦残留 7,下次 --keep-awake 读到的「原值」就是 7,
+        # 收尾又写回 7,常亮再也清不掉(v4 之前默认 keep_awake=True + 单 dict 覆写 prev,
+        # 真在真机上留下过这种永久常亮)。测试期的常亮绝不留成设备常态。
         rc, _, _ = run([adb, "-s", dev, "shell", "settings", "put", "global",
-                        "stay_on_while_plugged_in", str(entry.get("prev", "0"))],
+                        "stay_on_while_plugged_in", str(STAY_ON_RELEASE)],
                        timeout=RESTORE_TIMEOUT)
         return kind if rc == 0 else None
     if kind == "harmony_timeout":
@@ -1178,7 +1185,7 @@ def restore_screen(meta):
     """release / 回收陈旧锁时收尾改过的屏幕设置(尽力而为),返回已处理的 type 列表。
 
     Android 自动锁屏统一设为 1 分钟;鸿蒙撤销超时覆盖交还系统设置;
-    --keep-awake 设过的 stay_on_while_plugged_in 按原值还原。
+    --keep-awake 设过的 stay_on_while_plugged_in 统一关掉(0),都不回写原值。
     """
     dev = (meta or {}).get("device_id")
     entries = as_restore_list((meta or {}).get("screen_restore"))
@@ -1249,9 +1256,11 @@ def lock_screen(meta):
             adb = tool("adb")
             if not adb:
                 return None
-            # KEYCODE_SLEEP 是幂等的:已熄屏再发一次仍是熄屏。
+            # KEYCODE_SLEEP 是幂等的:已熄屏再发一次仍是熄屏(Dozing 也算已熄屏,
+            # 部分 ROM 熄屏后走 doze dream,屏幕是灭的)。
             # KEYCODE_POWER 是开关型,屏幕已灭时会把它重新点亮——只在回读确认仍
-            # Awake(说明这台 ROM 无视了 SLEEP 注入,如 Lineage/polaris)时才用它兜底。
+            # Awake 时才用它兜底:那说明 SLEEP 没生效,或设备刚被别的东西唤醒
+            # (USB 供电抖动的 WAKE_REASON_PLUGGED_IN 最常见),两种情况按一下都对。
             run([adb, "-s", dev, "shell", "input", "keyevent", "KEYCODE_SLEEP"],
                 timeout=RESTORE_TIMEOUT)
             time.sleep(1)
@@ -1263,7 +1272,8 @@ def lock_screen(meta):
             time.sleep(1)
             if android_power_state(adb, dev) != "awake":
                 return "android"
-            log(f"{dev}: SLEEP/POWER 键注入均被 ROM 忽略,依赖 1 分钟自动锁屏兜底熄屏")
+            log(f"{dev}: 两次键注入后仍是 Awake(ROM 忽略电源键,或有东西在反复唤醒——"
+                f"多为 USB 供电抖动),依赖 1 分钟自动锁屏兜底熄屏")
             return None
         if plat == "harmony":
             hdc = hdc_tool()
