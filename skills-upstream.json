@@ -164,6 +164,26 @@
           "src": "skills/patrol-test-architecture"
         }
       ]
+    },
+    {
+      "id": "awesome-genmedia",
+      "repo": "https://github.com/awesome-genmedia/skills",
+      "ref": "main",
+      "commit": "e4e641e21e59561fab7ab2bb7d90889e04aed84e",
+      "sparse": [
+        "sound-effects"
+      ],
+      "skills": [
+        {
+          "name": "sound-effects",
+          "src": "sound-effects",
+          "extra": {
+            "LICENSE": "LICENSE"
+          },
+          "patch": "patches/sound-effects.patch",
+          "note": "上游把 skill 直接放在仓库根的同名目录下;patch 加了 402 诊断与标准 API 兜底方案,并放宽 allowed-tools。"
+        }
+      ]
     }
   ]
 }
