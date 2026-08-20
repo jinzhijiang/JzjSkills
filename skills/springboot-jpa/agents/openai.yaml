@@ -1,0 +1,4 @@
+interface:
+  display_name: "Spring Boot JPA Patterns"
+  short_description: "Spring Boot / Spring Data JPA 实体、关联、查询、事务与性能的生产级模式"
+  default_prompt: "Use $springboot-jpa to design JPA entities, repositories, queries and transactions following production best practices."

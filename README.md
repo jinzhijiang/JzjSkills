@@ -49,6 +49,10 @@ JzjSkills/
 │   │   ├── SKILL.md
 │   │   ├── agents/openai.yaml
 │   │   └── scripts/cors_server.py       # python3 标准库，带 CORS + PNA 头的本地静态服务
+│   ├── springboot-jpa/                  # 自建：Spring Boot JPA 生产代码模式
+│   │   ├── SKILL.md
+│   │   ├── agents/openai.yaml
+│   │   └── references/                  # 实体、关联、查询、事务、性能 5 个文件
 │   ├── codex-image/                     # 外部引入：用 codex 订阅额度生图
 │   │   ├── SKILL.md
 │   │   ├── LICENSE                      # MIT，随上游一并保留
@@ -129,6 +133,8 @@ description: 简短描述这个 skill 做什么
 | `chrome-file-upload-bridge` | 自建 / 内部整理 | — | — | 2026-08-10 | 自建；从笔笔记账上架 OPPO 的实操中提炼：MCP `file_upload` 对 <10MB 的文件会吞掉 `paths` 参数、>10MB 又撞它自己的 10MB 上限，computer-use 对浏览器只给 read 权限点不了系统文件框，三者叠加等于不可用。解法是本地起 `scripts/cors_server.py`（带 `Access-Control-Allow-Private-Network`，否则 HTTPS 页面发往 127.0.0.1 的请求会永远 pending），再用 `javascript_tool` 执行 `fetch → new File → DataTransfer → dispatch change` 注入，字节不过 MCP 桥所以没有体积上限；含首次放行提示、顶层 `await` 撞 45s CDP 超时的规避、注入后 `input.files` 被组件清空属正常等坑 |
 | `test-device-allocator` | 自建 / 内部整理 | — | — | 2026-08-07 | 自建；多项目并发 AI 测试的真机/模拟器分配与互斥锁：`scripts/device_lock.py`（python3 标准库，acquire/wake/release/status/clean），锁注册表 `~/.ai-device-locks/`，无空闲设备时自动新建 Android/iOS 模拟器；支持把已连接的 HarmonyOS 真机/模拟器纳入分配池（`--platform android,harmony`）；acquire 会亮屏解锁并把**真机**自动锁屏放宽到 10 分钟（`--screen-timeout` 可调），release 还原原值并熄屏落锁，长时间无人值守才显式用 `--keep-awake` |
 | `sound-effects` | [awesome-genmedia/skills](https://github.com/awesome-genmedia/skills) | [sound-effects/](https://github.com/awesome-genmedia/skills/tree/main/sound-effects) | MIT | 2026-08-16 | 引入上游 `e4e641e`；上游把 skill 直接放在仓库根的同名目录下，`LICENSE` 取自仓库根。**带本地 patch**：上游用的 `eachsense-agent.core.eachlabs.run` 端点在余额充足时仍回 402 （对照实验：错 key 回 401、同一把 key 走标准 API 回 200，说明是那个 beta 服务看不到 workspace 余额），patch 在开头加了诊断表与「别去充值」的结论，补了**已验证可用的标准预测 API 兜底方案**（音效 `bytedance-seed-audio-1-0`、音乐 `ace-step-1-5-text-to-music`，含提交/轮询、一次只能跑一个预测的 429 限制、以及为什么不能用 ffmpeg `silenceremove` 去静音），并把 `allowed-tools` 从只放行 `curl` 放宽到 `curl/python3/ffmpeg/ffprobe`——否则兜底方案自己跑不起来 |
+
+| `springboot-jpa` | 自建 / 综合多方整理 | [vibeeval jpa-patterns](https://github.com/vibeeval/vibecosystem/blob/main/skills/jpa-patterns/SKILL.md)、[Amplicode spring-data-jpa](https://github.com/Amplicode/spring-skills/tree/main/skills/spring-data-jpa)、[Spring Data JPA 官方文档](https://docs.spring.io/spring-data/jpa/reference/jpa.html) | — | 2026-08-21 | 自建；写生产 JPA 代码的决策手册（测试归 `spring-jpa-testing`，通用工程惯例归 `java-springboot`）。综合三方资料**重写而非引入**：vibeeval 的 jpa-patterns（codelably、affaan-m/ECC 两个仓库是它的中文转译，内容相同）覆盖面广但每节都浅；Amplicode 的 spring-data-jpa 取其「先探测项目既有约定再写码」思想与实体实现规则（proxy-safe equals/hashCode、Set vs List、显式命名），但其 repository/transaction 参考在上游是 0 字节占位文件且 SKILL.md 绑定自家 IntelliJ MCP 插件，不可原样引入；API 细节以 Spring Data JPA 4.1.0 官方文档校准（标注 3.1+/4.0+ 版本门槛）。SKILL.md 给默认决策表 + 高频事故速查，细节沉到 references/ 5 个文件（实体设计、关联与 N+1、Repository 与查询、事务与锁、性能与配置） |
 
 ## 更新已引入的 Skill
 
