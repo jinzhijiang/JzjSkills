@@ -55,7 +55,7 @@ description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、i
 |---|---|---|
 | `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
 | `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake` |
-| `release` | 释放锁(幂等,恒 exit 0);真机收尾:Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
+| `release` | 释放锁(幂等,恒 exit 0);真机收尾:Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁。**`--device` 指向没有锁记录的设备时照样收尾**(记进 `tidied`),用来收拾绕过 acquire 或崩在半路留下的孤儿设备 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
 | `status` | 设备 × 锁全景(排查谁占了什么) | 无 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
 

@@ -69,7 +69,15 @@ hdc -t <id> shell power-shell timeout -o 600000        # 撤销用 timeout -r,�
 
 ## 测试后手机一直亮屏 / 不会自动锁屏
 
-正常路径下 `release` 会按 Home 退出被测 app、把自动锁屏统一设为 1 分钟,再把真机熄屏。会话崩在半路时按下面三项自查:
+**先试这一条**——它现在对「压根没有锁」的设备也管用:
+
+```bash
+python3 <skill根>/scripts/device_lock.py release --device <id>
+```
+
+`released` 为空、`tidied` 里是你的设备,就说明这台机器**从来没被 acquire 过**:某个会话绕过本 skill 直接 `adb -s` 装包跑测,或者在 release 之前就崩了。设备侧收尾照做(Home → 自动锁屏设回 1 分钟 → 熄屏),不需要先补一个锁。
+
+正常路径下 `release` 会按 Home 退出被测 app、把自动锁屏统一设为 1 分钟,再把真机熄屏。上面那条也不奏效时,按下面三项手动自查:
 
 ```bash
 adb -s <id> shell input keyevent KEYCODE_HOME                   # 被测 app 常设「保持常亮」flag,留在前台会顶住自动锁屏

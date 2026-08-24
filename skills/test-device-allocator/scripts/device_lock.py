@@ -1881,9 +1881,37 @@ def cmd_acquire(args):
     fail(EXIT_NO_DEVICE, "NO_DEVICE", "无空闲设备且无法新建模拟器", hint=platform_hint)
 
 
+def tidy_unlocked_device(device_id, lock_screen_after, warnings):
+    """对**没有锁记录**的设备做设备侧收尾:Home 退出前台 app → 恢复屏幕设置 → 熄屏。
+
+    存在的理由是一类真实事故:有会话绕过 acquire 直接 `adb -s` 装包跑测(或在
+    release 前崩了),于是设备停在被测 app 的前台、屏幕一直亮着,而锁目录里干干
+    净净——`release --device` 找不到锁,过去就报 `ok: true` + `not_found` 然后
+    什么都不做。一个人在「app 还开着、屏幕不熄」时最先敲的就是这条命令,它却报
+    成功、却不收尾,是这个脚本里最会骗人的一条路径。
+
+    收尾三步本身是幂等且无副作用的(Home 不会关掉 app,只是退到后台),所以在
+    没有任何人持有该设备时做它是安全的:没有锁 = 没有会话在用 = 收拾了不碍着谁。
+    设备当前被**别的会话**持有时不会走到这里——那种情况下上面的 keys 非空。
+    """
+    meta = infer_device(device_id, warnings)
+    if not meta:
+        return None
+    if lock_screen_after and press_home(meta):
+        log(f"{device_id}: 已按 Home 退出前台 app(无锁记录,按孤儿设备收尾)")
+    done = restore_screen(meta)
+    if done:
+        log(f"{device_id}: 屏幕设置已收尾({', '.join(done)})")
+    if lock_screen_after and lock_screen(meta):
+        log(f"{device_id}: 已熄屏落锁")
+    return meta
+
+
 def cmd_release(args):
-    released, not_found = [], []
+    released, not_found, tidied = [], [], []
+    warnings = []
     keys = []
+    orphan_targets = []
     if args.key:
         keys = [args.key]
     elif args.device:
@@ -1891,7 +1919,7 @@ def cmd_release(args):
             if meta and args.device in (meta.get("device_id"), meta.get("name")):
                 keys.append(meta.get("device_key"))
         if not keys:
-            not_found.append(args.device)
+            orphan_targets.append(args.device)
     else:  # --all-mine
         owner = args.owner or default_owner_pid()
         keys = [m.get("device_key") for _, m, _ in list_locks()
@@ -1901,9 +1929,27 @@ def cmd_release(args):
             released.append(k)
         else:
             not_found.append(k)
+    for dev in orphan_targets:
+        if tidy_unlocked_device(dev, not args.no_lock, warnings):
+            tidied.append(dev)
+        else:
+            not_found.append(dev)
     if released:
         log(f"已释放: {', '.join(released)}(模拟器保持运行,供下个会话复用)")
-    emit({"ok": True, "action": "release", "released": released, "not_found": not_found})
+    if tidied:
+        log(f"已收尾(本就无锁): {', '.join(tidied)}")
+    out = {
+        # 只有「点名了目标却一件事都没做成」才算失败。过去这里恒为 True,于是
+        # 一条什么都没做的 release 和一条真的收了尾的 release 长得一模一样。
+        "ok": bool(released or tidied) or not not_found,
+        "action": "release",
+        "released": released,
+        "tidied": tidied,
+        "not_found": not_found,
+    }
+    if warnings:
+        out["warnings"] = warnings
+    emit(out)
 
 
 def infer_device(device_id, warnings):
