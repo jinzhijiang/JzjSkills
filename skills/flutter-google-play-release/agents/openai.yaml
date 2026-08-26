@@ -1,4 +1,0 @@
-interface:
-  display_name: "Flutter Google Play Release"
-  short_description: "维护商店文档并安全发布 Flutter Android 应用"
-  default_prompt: "Use $flutter-google-play-release to document, build, validate, and hand off this Flutter app's Google Play release."

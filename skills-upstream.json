@@ -59,7 +59,7 @@
       "sparse": [
         "skills"
       ],
-      "note": "仓库里的 flutter-google-play-release、flutter-setup-firebase-crashlytics、flutter-use-fvm 是自建的,故意不登记,脚本不会碰。",
+      "note": "仓库里的 flutter-setup-firebase-crashlytics、flutter-use-fvm 是自建的,故意不登记,脚本不会碰。",
       "skills": [
         {
           "name": "flutter-add-integration-test",

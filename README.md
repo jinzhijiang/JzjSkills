@@ -24,11 +24,6 @@ JzjSkills/
 │   │   ├── agents/openai.yaml
 │   │   ├── references/                  # cli.md、troubleshooting.md
 │   │   └── scripts/device_lock.py       # python3 标准库
-│   ├── flutter-google-play-release/     # 自建：Flutter Google Play 安全发布
-│   │   ├── SKILL.md
-│   │   ├── agents/openai.yaml
-│   │   ├── references/                  # 审计、Console、Android 质量
-│   │   └── scripts/verify_flutter_play_release.py
 │   ├── countly-data-analysis/           # 自建：自建 Countly 的 Read API 查询与埋点对账
 │   │   ├── SKILL.md
 │   │   ├── config.example.env           # 凭据模板，按项目放到 ~/.config/ai-ignore-config/<项目名>/
@@ -121,7 +116,6 @@ description: 简短描述这个 skill 做什么
 | `flutter-use-http-package` | 同上 | [skills/flutter-use-http-package/](https://github.com/flutter/skills/tree/main/skills/flutter-use-http-package) | BSD-3-Clause | 2026-07-01 | 原样引入，仅含 `SKILL.md` |
 | `flutter-setup-firebase-crashlytics` | 自建 / 内部整理 | [Firebase Flutter 官方文档](https://firebase.google.com/docs/flutter/setup) | — | 2026-07-18 | 自建；默认完整接入 Firebase Core、Google Analytics 与 Crashlytics，并要求设备上报验证和临时崩溃入口清理 |
 | `flutter-use-fvm` | 自建 / FVM 官方文档整理 | [FVM Documentation](https://fvm.app/documentation/getting-started/overview) | — | 2026-07-18 | 自建；强制 Flutter/Dart 命令通过 `fvm flutter` / `fvm dart` 执行，并按需覆盖完整配置、命令、IDE/CI 与故障排查 |
-| `flutter-google-play-release` | 自建 / Google Play 上架实操整理 | — | — | 2026-07-30 | 自建；Flutter Android 首发与更新的证据审计、商店资料、政策声明、IARC、AAB、质量建议和最终送审确认门 |
 | `git-cz` | 自建 / 基于 [streamich/git-cz](https://github.com/streamich/git-cz) 整理 | [streamich/git-cz](https://github.com/streamich/git-cz)（npm `git-cz@4.9.0`，Unlicense） | — | 2026-08-04 | 自建；统一所有项目的提交信息风格：消息契约、`assets/changelog.config.js` 全局模板、`scripts/check_commit_msg.py`（python3 标准库，无 node 也能校验，可装成 commit-msg 钩子） |
 | `codex-image` | [xntj-ai/codex-image](https://github.com/xntj-ai/codex-image) | [仓库根目录即 skill](https://github.com/xntj-ai/codex-image) | MIT | 2026-08-04 | 原样引入（上游 `9b4e0bc`）；仓库根目录本身就是 skill，取 `SKILL.md` + `references/`（2 个文件）+ `scripts/codex_image.py`，并保留 `LICENSE`；未引入上游 `README.md`、`.gitignore` |
 | `patrol-setup` | [leancodepl/patrol](https://github.com/leancodepl/patrol)（Patrol 官方） | [skills/patrol-setup/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-setup) | Apache-2.0 | 2026-08-04 | 原样引入（上游 `cf2a783`，主分支为 `master`），仅含 `SKILL.md`；Flutter 项目首次接入 Patrol（仅覆盖 Android） |
@@ -158,7 +152,7 @@ python3 scripts/update_skills.py --no-deploy                      # 只更新仓
 
 几个要点：
 
-- **自建 skill 不登记在清单里，脚本永远不碰。** 这也是 `cp -R skills/flutter-*` 那种前缀通配的替代品——`flutter-google-play-release`、`flutter-setup-firebase-crashlytics`、`flutter-use-fvm` 这 3 个自建 flutter skill 不会因为上游哪天加了同名目录而被静默覆盖。
+- **自建 skill 不登记在清单里，脚本永远不碰。** 这也是 `cp -R skills/flutter-*` 那种前缀通配的替代品——`flutter-setup-firebase-crashlytics`、`flutter-use-fvm` 这 2 个自建 flutter skill 不会因为上游哪天加了同名目录而被静默覆盖。
 - **本地适配存成 patch**（见 `patches/`），同步后自动重打。若上游改动了被 patch 的位置导致打不上，脚本会**报错退出（exit 1）且不部署**，此时工作区里是未打补丁的上游原样，按提示手工合并后重新生成 patch：
 
   ```bash
