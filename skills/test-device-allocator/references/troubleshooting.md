@@ -115,6 +115,26 @@ adb -s <id> shell settings put global wake_when_plugged_or_unplugged 0
 
 `release` 会先按 Home 退出被测 app(Android `KEYCODE_HOME`、鸿蒙 `uinput -K -d 1 -u 1`),再把真机熄屏落锁(Android `KEYCODE_SLEEP`、鸿蒙 `power-shell suspend`),这是有意为之:被测 app 常设「保持常亮」flag,留在前台手机就一直亮着耗电;测完的手机不该停在解锁态。要留在 app 界面亮屏继续看,就传 `release --no-lock`(Home 与熄屏都跳过)。模拟器不受影响(不按 Home、不熄屏、不关机)。
 
+## 点击落到别的 app / 应用反复被切到前台 / 截图拍到的是另一个 app
+
+**不是设备坏了,也不是被测 app 崩了——是另一个 AI 会话正在用这台设备。**
+
+典型表现(2026-08-28 真实踩到):`am start` 起自己的 app,几秒后前台变成一个完全不相干的
+应用;按坐标点击落进了那个应用;`screencap` 拍到的是它的界面;强行 `force-stop` 掉对方,
+下一次点击它又回来了。
+
+```bash
+python3 scripts/device_lock.py status --busy
+# → 哪台被谁占着,owner_pid 与 project 都在里面
+```
+
+**换一台,不要跟它抢。** 两个会话轮流把对方切到后台,谁的测试都做不完,
+而且会互相污染对方的验证结论(你以为自己的功能没生效,其实只是没在前台)。
+
+那一次的根因值得记下来:被占那台的锁记录完好、对方是规规矩矩 `acquire` 的,
+**绕过锁的是没走 acquire 的这一边**。锁是协作约定,只对走本 skill 的会话生效
+——所以「我就用一下、应该没人」这种想法本身就是故障源。
+
 ## 手动清理
 
 本 skill 的 release **不关模拟器**(留给下个会话热复用)。需要彻底清理时:

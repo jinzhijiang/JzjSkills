@@ -182,7 +182,23 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ## status
 
-无参数。输出:
+| 参数 | 用途 |
+|---|---|
+| 无 | 设备 × 锁全景 + 内存闸门 |
+| `--device <id>` | 只看这一台(id / 名字 / device_key)。**碰设备前的一秒确认**:全景输出二十来台时,肉眼找「这台被占没」本身就是摩擦,摩擦大到一定程度人就不看了——那正是绕过锁的开端 |
+| `--busy` | 只列当前被锁着(`state: HELD`)的设备,回答「谁占着什么」 |
+
+两个过滤参数可叠加。过滤视图**不带 `memory` 字段**(内存闸门与「这台能不能用」无关),
+改带 `filtered_by` 与 `device_count`。`--device` 匹配不到任何设备时以 `NO_DEVICE`(exit 3)失败。
+
+```bash
+# 已经从 adb devices 拿到 id,想确认没人占着
+python3 scripts/device_lock.py status --device 13261FDD4004HW
+# → {"ok": true, …, "devices": [{…, "lock": {"state": "HELD", "owner_pid": 5240,
+#      "project": "/Users/x/Projects/flutter_recto", …}}], "filtered_by": "device"}
+```
+
+无参数时输出:
 
 ```json
 {"ok": true, "action": "status", "lock_root": "…",

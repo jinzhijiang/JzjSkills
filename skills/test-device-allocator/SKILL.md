@@ -1,12 +1,51 @@
 ---
 name: test-device-allocator
-description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、iOS 和 HarmonyOS 真机或模拟器。任务要执行 Flutter run/drive、安装 app、UI 探查、截图点击或 E2E 验证时使用：先用 device_lock.py acquire 领设备，再把 device_id 显式传给每条 flutter -d、adb -s 或 hdc -t 命令，当前步骤测完、没有紧接着要用设备的下一步就立即 release，不为「可能还要测」占着手机。支持优先空闲真机、复用或新建模拟器、多平台组合、宿主内存限流和 Android 模拟器 RAM 限制。acquire 会亮屏解锁，并把真机的自动锁屏时长临时放宽到 10 分钟，避免构建等空档里反复熄屏；release 收尾按 Home 退出被测 app（释放它的屏幕常亮 flag）、把自动锁屏统一设为 1 分钟再熄屏落锁，测完的手机不空耗电，长时间无人值守才显式用 --keep-awake。也用于排查设备被占用、模拟器互相污染或卡死、内存不足、设备熄屏、屏幕黑屏点不动、测试中途频繁锁屏、测试后一直亮屏或不会自动锁屏。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器或用户手动调试自行选设备。
+description: 在这台机器上碰任何 Android、iOS 或 HarmonyOS 真机/模拟器之前先领锁，避免和别的 AI 会话抢同一台设备。**只要你接下来要跑 `adb -s`、`adb install`、`adb shell input`/`screencap`、`hdc -t`、`flutter run/drive/install`、或用模拟器 MCP 点屏截图，第一条命令就必须是 `device_lock.py acquire`，而不是那条 adb**。已经用 `adb devices` 拿到了设备 id、不需要帮你挑设备时同样要走：`acquire --device <id>` 的作用是确认没人占着，被占会直接报出对方的 owner_pid 与 project。不确定要不要领？`status --device <id>` 一行就能看出来，几乎零成本。别用「现在应该没人用吧」来跳过——**别的会话在不在跑，你在自己的会话里是看不见的**。也用于排查这些症状：点击落到别的 app 上、应用反复被切到前台、截图拍到的是另一个 app、设备被占用、模拟器互相污染或卡死、内存不足、屏幕黑屏点不动、测试中途频繁锁屏、测完一直亮屏不锁屏。测完当前这步、后面没有紧接着要用设备的步骤就立刻 release。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器、用户手动调试自行选设备。
 ---
 
 # 并发测试设备分配(device_lock)
 
 **适用**:多个 AI 会话 / 多个项目同时要把 app 跑到真机或模拟器上做自动化测试时,先 `acquire` 领设备、测完 `release` 还锁,避免挤进同一台模拟器互相污染流程。
 **不适用**:`flutter test` 单元 / Widget 测试;启动或新建鸿蒙模拟器(用 deveco-studio-emulator,本 skill 只分配**已连上**的鸿蒙目标);人工调试自选设备。
+
+## 硬规则:第一条设备命令是 acquire,不是 adb
+
+**碰设备的第一条命令不是 `adb` / `hdc` / `flutter run`,而是 `acquire`。** 没有例外,没有前置条件。
+
+触发它的不是「我要开始一轮设备测试了」这种有仪式感的时刻——真实情况是你会一小步一小步滑进去:
+`flutter devices` 看一眼 → `adb devices` 拿到 id → `adb install` 装个包 → `adb shell input tap` 点两下。
+每一步单独看都像顺手为之,合起来已经占了别人的手机好几个小时。所以判据是**动作**,不是意图:
+
+> 只要下一条命令里出现 `adb -s` / `adb install` / `adb shell input` / `screencap` / `hdc -t` /
+> `flutter run|drive|install` / 模拟器 MCP 的点击截图,就先 acquire。
+
+### ⚠️ 「我已经知道要用哪台了」不是跳过的理由
+
+这是最常见的绕过方式:`adb devices` 列出三台,挑一台就开干——毕竟不需要谁帮我挑。
+但 acquire 的作用**从来不是帮你挑设备,是确认没人占着**。手上已有 id 时照样走:
+
+```bash
+python3 <skill根>/scripts/device_lock.py acquire --device <id> --owner $PPID --project "$PWD"
+```
+
+被别人占着时它以 `EXIT_BUSY` 拒绝,并直接告诉你对方的 `owner_pid` 与 `project`,你当场就能换一台。
+
+### ⚠️ 「现在应该没人在用吧」是不可能成立的判断
+
+**别的会话在不在跑,你在自己的会话里看不见。** 任何形式的「这台看起来是空的」「同时开两个会话的概率不大」
+都不是判断,是赌。不确定就花一秒:
+
+```bash
+python3 <skill根>/scripts/device_lock.py status --device <id>   # 只看这一台
+python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什么
+```
+
+### 症状:点击落到别的 app / 应用反复被切走 / 截图拍到的是另一个 app
+
+**这不是设备坏了,也不是你的 app 崩了,是另一个会话正在用这台设备。**
+典型表现:你 `am start` 自己的 app,几秒后前台变成一个完全不相干的应用;
+按坐标点击落进了那个应用;`screencap` 拍到的是它的界面。
+先 `status --busy` 看谁占着,然后**换一台**,不要跟它抢——两个会话轮流把对方切走,谁的测试都做不完。
 
 ## 何时必须用(重要)
 
@@ -56,7 +95,7 @@ description: 为多项目并发 AI 设备测试分配并互斥锁定 Android、i
 | `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
 | `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake` |
 | `release` | 释放锁(幂等,恒 exit 0);真机收尾:Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁。**`--device` 指向没有锁记录的设备时照样收尾**(记进 `tidied`),用来收拾绕过 acquire 或崩在半路留下的孤儿设备 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
-| `status` | 设备 × 锁全景(排查谁占了什么) | 无 |
+| `status` | 设备 × 锁全景(排查谁占了什么) | `--device <id>` 只看这一台(碰设备前的一秒确认)、`--busy` 只列被别人锁着的 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
 
 完整参数、JSON schema、exit code 表与锁目录布局见 [references/cli.md](references/cli.md)。

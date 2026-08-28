@@ -2120,9 +2120,33 @@ def cmd_status(args):
               "vm_overhead_gb": MEM_VM_OVERHEAD_GB,
               "hard_floor_gb": MEM_HARD_FLOOR_GB,
               "can_start_new_vm": quota_ok and avail_ok}
-    emit({"ok": True, "action": "status", "lock_root": lock_root(),
-          "memory": memory,
-          "devices": devices, "orphan_locks": orphans, "warnings": warnings})
+    # 过滤:让「碰设备前看一眼」真的只要一行,而不是一屏 JSON。
+    # 全景输出有二十来台设备时,肉眼找「这台被占没」本身就是一道摩擦,
+    # 摩擦足够大时人就不看了——那正是绕过锁的开端。
+    selected, filtered = devices, None
+    if getattr(args, "device", None):
+        want = args.device
+        selected = [d for d in devices
+                    if want in (d["device_id"], d["name"], d["key"])]
+        filtered = "device"
+        if not selected:
+            fail(EXIT_NO_DEVICE, "NO_DEVICE",
+                 f"没有匹配 {want} 的设备",
+                 hint="不带 --device 跑一次 status 看当前可见的设备")
+    if getattr(args, "busy", False):
+        selected = [d for d in selected
+                    if (d["lock"] or {}).get("state") == "HELD"]
+        filtered = "busy" if filtered is None else f"{filtered}+busy"
+
+    out = {"ok": True, "action": "status", "lock_root": lock_root(),
+           "devices": selected, "orphan_locks": orphans, "warnings": warnings}
+    if filtered:
+        # 过滤视图是给「能不能用这台」用的,内存闸门与它无关,省掉噪音。
+        out["filtered_by"] = filtered
+        out["device_count"] = len(selected)
+    else:
+        out["memory"] = memory
+    emit(out)
 
 
 def cmd_clean(args):
@@ -2220,7 +2244,9 @@ def main():
                    help="释放后不按 Home、不熄屏落锁(默认会先 Home 退出被测 app 再熄屏;"
                         "想留在当前界面继续看时用)")
 
-    sub.add_parser("status", help="设备 × 锁全景")
+    st = sub.add_parser("status", help="设备 × 锁全景")
+    st.add_argument("--device", help="只看这一台(id / 名字 / device_key),用于碰设备前确认没人占着")
+    st.add_argument("--busy", action="store_true", help="只列当前被别人锁着的设备")
 
     c = sub.add_parser("clean", help="回收陈旧锁")
     c.add_argument("--all", action="store_true", help="清除全部锁(慎用)")
