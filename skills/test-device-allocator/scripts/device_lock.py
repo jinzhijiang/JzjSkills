@@ -692,6 +692,23 @@ def adb_devices(warnings):
     return devs, adb
 
 
+def android_responsive(adb, serial, timeout=8):
+    """这台机器还答不答话。
+
+    **`adb devices` 报 `device` 只说明 adbd 还在握手,不代表它还能干活。**
+
+    2026-09-09 真踩到:一台 Pixel 2 XL 全程稳稳地报 `device`,而
+    Gradle 装 APK 卡到 ~315s 超时(`ShellCommandUnresponsiveException`);
+    下一轮变成 `INSTRUMENTATION_ABORTED: System has crashed`;再下一轮它直接
+    从 `adb devices` 里消失了。三轮 E2E 全部白跑,而每一轮报出来的都是
+    「跑了 0 个测试」——看着像构建坏了,不像手机坏了,于是先去查了代码。
+
+    派活之前先问一句话,答不上来就不派。一次约 100ms,比白跑一轮便宜得多。
+    """
+    rc, out, _ = run([adb, "-s", serial, "shell", "echo", "ok"], timeout=timeout)
+    return rc == 0 and "ok" in out
+
+
 def all_emulator_serials(adb):
     rc, out, _ = run([adb, "devices"], timeout=CMD_TIMEOUT)
     if rc != 0:
@@ -1294,11 +1311,15 @@ def cand(tier, platform_, kind, key, name, device_id, needs_boot):
             "name": name, "device_id": device_id, "needs_boot": needs_boot}
 
 
-def gather_candidates(platforms, no_physical, warnings):
+def gather_candidates(platforms, no_physical, warnings, want=None):
     """按优先级组装候选:tier1 真机 > tier2 已运行模拟器 > tier3 已停止模拟器。
 
     platforms 是有序列表(如 ["android", "harmony"]):tier 之间严格有序,同一 tier
     内按这个顺序排——所以 `--platform android,harmony` = 先 Android 后鸿蒙。
+
+    真机要先过 [android_responsive] 这一关:`adb devices` 报 `device` 但不答
+    shell 的机器不参与分配。`want`(即 `--device` 显式点名的那台)例外——
+    只告警不拦截,和 `--no-physical`、内存闸门对显式指定的处理一致。
     """
     t1, t2, t3 = [], [], []
     for plat in platforms:
@@ -1313,6 +1334,14 @@ def gather_candidates(platforms, no_physical, warnings):
                     else:
                         warnings.append(f"{d['serial']} 无法反查 AVD 名,跳过该实例")
                 elif not no_physical:
+                    if not android_responsive(adb, d["serial"]):
+                        msg = (f"{d['serial']} adb 报 device 却不答 shell,"
+                               "多半正在掉线")
+                        if want in (d["serial"],):
+                            warnings.append(msg + "(--device 指定,仍照办)")
+                        else:
+                            warnings.append(msg + ",跳过")
+                            continue
                     t1.append(cand(1, "android", "physical",
                                    f"android-device:{d['serial']}",
                                    d["serial"], d["serial"], False))
@@ -1730,7 +1759,8 @@ def cmd_acquire(args):
                       include_harmony="harmony" in platforms)
     mem_blocked = False
     cands = gather_candidates(platforms,
-                              False if explicit else args.no_physical, warnings)
+                              False if explicit else args.no_physical, warnings,
+                              want=args.device if explicit else None)
     if explicit:
         matches = [c for c in cands
                    if args.device in (c["device_id"], c["name"]) or c["key"] == args.device]

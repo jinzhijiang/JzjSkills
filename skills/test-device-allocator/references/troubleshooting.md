@@ -166,7 +166,41 @@ python3 <skill根>/scripts/device_lock.py clean --all
 | 6 ENV_MISSING | 平台工具链缺失 | 装 Android SDK / Xcode / DevEco Studio(hdc,或设 `HDC_PATH`);Linux 宿主不支持 iOS;组合平台里缺一个只跳过并告警,不报错 |
 | 7 BUSY | `--device` 指定的设备被占 | 去掉 `--device` 另挑;或 `status` 看占用者是谁 |
 | 8 INTERNAL | 未预期异常 | 看 stderr 的 traceback 排查 |
+| —(不报错,只在 warnings 里) | 真机报 `device` 却不答 shell,已跳过 | 见上「真机正在掉线」;要强行用它就 `--device` 点名 |
 | 9 MEMORY_PRESSURE | 内存闸门拦截(配额已满、可用内存低于 6GB 硬下限——第一台也拦,或不足每台开销 + 2GB) | 优先领真机;关闭闲置模拟器(`adb -s <id> emu kill` / `xcrun simctl shutdown <udid>`)、退出大进程释放内存后重试;Android 可 `--memory 1024` 压小单台换配额(硬下限不受影响);确认有余量可 `--mem-override` 或调高 `--max-emulators` / `AI_DEVICE_MAX_EMULATORS` |
+
+## 真机正在掉线(报 `device`,却干不了活)
+
+**症状是「没有结果」,不是「结果是失败」。** 一整轮 E2E 跑完报 `Total: 0`,
+装包卡到 `ShellCommandUnresponsiveException`,或
+`INSTRUMENTATION_ABORTED: System has crashed`,再跑一轮设备干脆从
+`adb devices` 里没了。
+
+这类报错长得像构建坏了,所以人的第一反应是去查代码——2026-09-09 就这么白跑了
+三轮、~15 分钟。**判据很简单:一个判决都没拿到,就先查设备。**
+
+```bash
+adb devices                          # 还在不在
+adb -s <id> shell echo ok            # 在,那还答不答话
+adb -s <id> shell uptime             # 答,那是不是刚重启过
+```
+
+三步任意一步卡住或失败 → 换设备,别跟它耗:
+
+```bash
+python3 <skill根>/scripts/device_lock.py release --device <id>
+python3 <skill根>/scripts/device_lock.py acquire --project "$PWD"
+```
+
+`release` 对已经消失的设备是安全的:收尾命令尽力而为,失败只记日志,照样把锁还掉。
+
+**`acquire` 的探测挡得住哪一段。** 派设备前会 `adb shell echo ok` 问一句
+(约 50ms),报 `device` 却不答话的直接跳过并告警。但**「还答得上话、装包却已经
+要几百秒」的那一段它挡不住**——上面那台掉线之前正是这样,`echo ok` 秒回,
+`pm install` 卡死。所以探测是兜底,上面那三步仍然要会用。
+
+`--device` 显式点名的设备例外:只告警不拦截,和 `--no-physical`、内存闸门
+对显式指定的处理一致。
 
 ## 模拟器卡死(内存超卖)
 

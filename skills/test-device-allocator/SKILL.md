@@ -17,7 +17,8 @@ description: 在这台机器上碰任何 Android、iOS 或 HarmonyOS 真机/模�
 每一步单独看都像顺手为之,合起来已经占了别人的手机好几个小时。所以判据是**动作**,不是意图:
 
 > 只要下一条命令里出现 `adb -s` / `adb install` / `adb shell input` / `screencap` / `hdc -t` /
-> `flutter run|drive|install` / 模拟器 MCP 的点击截图,就先 acquire。
+> `flutter run|drive|install` / **`patrol test|develop`** / 模拟器 MCP 的点击截图 /
+> **patrol MCP 的 `patrol-run`**,就先 acquire。
 
 ### ⚠️ 「我已经知道要用哪台了」不是跳过的理由
 
@@ -25,10 +26,24 @@ description: 在这台机器上碰任何 Android、iOS 或 HarmonyOS 真机/模�
 但 acquire 的作用**从来不是帮你挑设备,是确认没人占着**。手上已有 id 时照样走:
 
 ```bash
-python3 <skill根>/scripts/device_lock.py acquire --device <id> --owner $PPID --project "$PWD"
+python3 <skill根>/scripts/device_lock.py acquire --device <id> --project "$PWD"
 ```
 
 被别人占着时它以 `EXIT_BUSY` 拒绝,并直接告诉你对方的 `owner_pid` 与 `project`,你当场就能换一台。
+
+### ⚠️ 不要传 `--owner $PPID`
+
+**别传 `--owner`,让脚本自己判定。** 它的 `default_owner_pid()` 会主动走到
+**祖父进程**(python → shell → AI 会话),拿到的是真正长命的那个 pid。
+
+而 AI harness 里每条命令通常是**新起的短命 shell**,`$PPID` 拿到的可能就是那个
+转瞬即死的 shell。锁一落库 owner 就死了 → 判定 `dead_pid` → 变陈旧 →
+**几十分钟后被别的会话正当回收**,而你还以为自己占着。
+
+2026-08-28 真踩到:`acquire --owner $PPID` 领到的锁,owner 43726 当场死亡,
+半小时后设备被另一个项目的会话拿走,期间没有任何报错。
+
+只有你**确知**某个长命进程的 pid 时才显式传 `--owner`。
 
 ### ⚠️ 「现在应该没人在用吧」是不可能成立的判断
 
@@ -40,6 +55,31 @@ python3 <skill根>/scripts/device_lock.py status --device <id>   # 只看这一�
 python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什么
 ```
 
+### 症状:一整轮跑下来「0 个测试结果」/ 装包卡到超时 / 设备从 adb 里消失
+
+**先怀疑手机,再怀疑代码。**
+
+失败和「没有结果」是两回事:`Failed: 2` 是测试跑了并给出了判决,值得去读代码;
+而 `Total: 0` 是**一个判决都没拿到**,那多半根本没跑起来。后者常见的三种原因里,
+只有一种跟你的改动有关:
+
+| 现象 | 是什么 | 怎么办 |
+|---|---|---|
+| `Total: 0` + 装包超时(`ShellCommandUnresponsiveException`)/ `INSTRUMENTATION_ABORTED: System has crashed` | **设备正在掉线** | `adb devices` + `adb -s <id> shell echo ok`;换一台 |
+| 跑之前就报 TLS / `HandshakeException` / 拉不到依赖 | 网络或工具链 | 重试 |
+| `Total: N` 且 `Failed: M` | 真的测试失败 | 才轮到读代码 |
+
+2026-09-09 的实际经过:一台 Pixel 2 XL 全程稳稳地报 `device`,却
+**连续三轮**把 E2E 跑成 0 结果——先是装 APK 卡到 ~315s 超时,再是
+`System has crashed`,最后从 `adb devices` 里彻底消失。因为报错长得像构建问题,
+中间白白改了两轮配置、试了两个错误假设,~15 分钟全花在找不存在的代码 bug 上。
+
+**代价极低的那一步永远先做**:`adb devices` 一秒钟就能把这类问题摘干净。
+
+> `acquire` 现在会先 `adb shell echo ok` 探一句话再派设备(约 50ms),
+> 报 `device` 却不答话的机器直接跳过。但**它挡不住「还答得上话、干活却已经很勉强」
+> 的那一段**——上面那台掉线前就是这样。所以这条症状表仍然要用。
+
 ### 症状:点击落到别的 app / 应用反复被切走 / 截图拍到的是另一个 app
 
 **这不是设备坏了,也不是你的 app 崩了,是另一个会话正在用这台设备。**
@@ -49,7 +89,9 @@ python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什�
 
 ## 何时必须用(重要)
 
-只要接下来要执行 `flutter run` / `flutter drive` / `flutter_skill launch` / 安装 APK·App 到设备,**一律先 acquire,并把返回的 `device_id` 显式传给后续每一条命令的 `-d` / `-s`**:
+只要接下来要执行 `flutter run` / `flutter drive` / `patrol test` / `patrol develop` /
+`flutter_skill launch` / 安装 APK·App 到设备,**一律先 acquire,并把返回的 `device_id`
+显式传给后续每一条命令的 `-d` / `-s`**:
 
 - 禁止不带 `-d` 让 flutter 自动挑设备——它可能挑中别的会话正在用的那台。
 - 一个测试会话只 acquire 一台;同 owner+project 重复 acquire 幂等返回已持有的设备(`reused: true`),不会多占。
@@ -92,7 +134,7 @@ python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什�
 
 | 子命令 | 用途 | 常用参数 |
 |---|---|---|
-| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--owner $PPID`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
+| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
 | `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake` |
 | `release` | 释放锁(幂等,恒 exit 0);真机收尾:Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁。**`--device` 指向没有锁记录的设备时照样收尾**(记进 `tidied`),用来收拾绕过 acquire 或崩在半路留下的孤儿设备 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
 | `status` | 设备 × 锁全景(排查谁占了什么) | `--device <id>` 只看这一台(碰设备前的一秒确认)、`--busy` 只列被别人锁着的 |
@@ -109,7 +151,7 @@ cd <被测项目根目录>
 # 1. 领设备(默认 android,真机最优先;全被占时自动新建模拟器并等它就绪)
 #    要测 iOS 传 --platform ios;两端皆可传 --platform any
 #    支持鸿蒙的 Flutter 项目(有 ohos/ + OpenHarmony 版 SDK)默认:--platform android,harmony
-OUT=$(python3 "$SKILL_DIR/scripts/device_lock.py" acquire --owner $PPID --project "$PWD")
+OUT=$(python3 "$SKILL_DIR/scripts/device_lock.py" acquire --project "$PWD")
 DEVICE_ID=$(echo "$OUT"  | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_id"])')
 DEVICE_KEY=$(echo "$OUT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["device_key"])')
 
@@ -162,6 +204,25 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 - 陈旧回收:owner 进程已死 → 立即可回收;存活但锁龄超 TTL(默认 8h)→ 可回收。每次 acquire 起手会**全局清扫**所有陈旧锁(不限本次要用的设备),死锁不会在注册表里躺尸。长时间压测传大 `--ttl`。
 - **release 只还锁,模拟器保持运行**,给下个会话热复用;彻底关机 / 删除 `ai-test-*` 模拟器的手动命令见 [references/troubleshooting.md](references/troubleshooting.md)。
 
+## Patrol 两个特有的注意点
+
+**① 不要再手动 `svc power stayon true`。** Patrol 的 `pump` / `waitUntilVisible` 是帧同步的,
+设备熄屏后 Flutter 停止产帧 → 无限等待,所以社区文档普遍教人先开常亮。但 `acquire` 已经做了
+唤醒 + 解锁 + 把自动锁屏放宽到 10 分钟,`release` 还会归位;手动 `stayon true` 会把
+`stay_on_while_plugged_in` 永久写成 7 且无人还原,正是本文排障表里「测试后手机一直亮屏」那一条。
+构建超长导致中途熄屏,用 `wake --key "$DEVICE_KEY"`,不要开常亮。
+
+**② patrol MCP 不认设备锁。** `patrol-run` / `patrol-screenshot` **没有设备参数**,
+多台设备连着时:`patrol-run` 取「第一台」——很可能不是你 acquire 到的那台;
+`patrol-screenshot` 直接报 `more than one device/emulator` 失败。
+
+所以多设备场景下:
+
+- 跑测试用 CLI 并显式指定:`patrol test -t <file> -d "$DEVICE_ID"`;
+- 需要截图用 `adb -s "$DEVICE_ID" exec-out screencap -p > x.png`;
+- 只有确认在场设备只有一台(或 `.mcp.json` 的 `PATROL_FLAGS` 里写死了 `-d`)时,
+  才用 patrol MCP 的 `patrol-run`。
+
 ## 与其他 skill 配合
 
 - **flutter-add-integration-test**:其 Android `flutter drive` 示例不带 `-d`,并发场景必须补上 `-d $DEVICE_ID`。
@@ -175,6 +236,7 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | exit 4 `NO_SYSTEM_IMAGE` | 复制 JSON `hint` 里的 sdkmanager 命令装镜像,再重跑 acquire |
 | exit 7 `BUSY` | `--device` 指定的设备被别的会话占用;去掉 `--device` 另挑,或 `status` 看占用者 |
 | exit 9 `MEMORY_PRESSURE` | 宿主可用内存低于 6GB 硬下限(第一台也拦),或已有模拟器在跑、内存不够再开一台。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)、退出大进程释放内存后重试;Android 可 `--memory 1024` 压小单台换配额(硬下限不受影响);确认有余量可 `--mem-override` 或调 `--max-emulators` |
+| 一整轮跑完 `Total: 0`(不是 `Failed: N`)/ 装包 `ShellCommandUnresponsiveException` / `INSTRUMENTATION_ABORTED` | **真机正在掉线,不是代码问题**。`adb devices` + `adb -s <id> shell echo ok` 一秒钟摘干净;确认后 `release` 再 `acquire` 换一台。acquire 的探测挡得住「不答话」,挡不住「答得上话但装包要几百秒」 |
 | 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
 | 截图全黑 / 点击没反应 / driver 找不到 widget | 真机持锁期间自动锁屏已放宽到 10 分钟;更长的构建后跑 `wake --key $DEVICE_KEY` 再点亮;`screen.locked=true` 说明设了 PIN,需人工解一次 |
@@ -188,6 +250,7 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 
 ## 相关 skill
 
+- **patrol-setup / patrol-write-test**:Patrol 的真机执行同样从 acquire 开始,见上一节两个注意点。
 - flutter-add-integration-test:把验证过的流程沉淀为正式集成测试
 - flutter-use-fvm:fvm 项目的命令前缀规则
 - deveco-studio-emulator:启动 / 新建 / 管理鸿蒙模拟器(本 skill 只分配已连上的鸿蒙目标,不负责把它跑起来)

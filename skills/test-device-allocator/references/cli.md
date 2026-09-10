@@ -42,7 +42,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `--no-physical` | 关 | 排除真机(不想占用插着的手机时用) |
 | `--no-create` | 关 | 只复用现有设备,无空闲直接 exit 3 |
 | `--headless` | 关 | 新启动的模拟器不开窗口(Android `-no-window`;iOS 不拉起 Simulator.app) |
-| `--owner <pid>` | 自动取祖父进程 | 锁持有者;AI 会话里建议显式传 `$PPID` |
+| `--no-probe` 无此开关 | — | 真机在被选中前一律先 `adb shell echo ok`(约 50ms);不答话的跳过并进 `warnings`。`--device` 点名的只告警不拦截 |
+| `--owner <pid>` | 自动取祖父进程 | 锁持有者。**AI 会话里别传**——默认值会走到祖父进程(python → shell → 会话)拿到真正长命的 pid;而 harness 里每条命令常是新起的短命 shell,`$PPID` 可能就是那个转瞬即死的 shell,锁一落库就成 `dead_pid` 陈旧锁、随后被别人正当回收。只有确知某个长命进程 pid 时才显式传 |
 | `--project <path>` | 当前目录 | 记录占用方,亦是幂等重取的匹配键 |
 | `--ttl <小时>` | 8 | 本锁的最大年龄 |
 | `--timeout <秒>` | Android 300 / iOS 180 | 模拟器启动等待上限 |
