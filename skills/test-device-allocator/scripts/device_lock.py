@@ -590,6 +590,9 @@ def release_lock(key, lock_screen_after=True):
     meta = read_meta(d)
     if not reclaim_path(d):
         return False
+    freed = free_patrol_ports(meta)
+    if freed:
+        log(f"{(meta or {}).get('device_id')}: 已停掉占用 Patrol 端口的 app({', '.join(freed)})")
     if lock_screen_after and press_home(meta):
         log(f"{key}: 已按 Home 退出前台 app(释放它的屏幕常亮)")
     done = restore_screen(meta)
@@ -661,6 +664,9 @@ def sweep_stale_locks():
         state, reason = eval_lock(path, meta)
         if state == "STALE" and reclaim_path(path):
             removed.append(f"{(meta or {}).get('device_key', dirname)}({reason})")
+            freed = free_patrol_ports(meta)
+            if freed:
+                log(f"{(meta or {}).get('device_id')}: 已停掉占用 Patrol 端口的 app({', '.join(freed)})")
             press_home(meta)       # 会话崩了也别把人家手机永久留在放宽/常亮状态
             restore_screen(meta)
             lock_screen(meta)
@@ -1218,6 +1224,93 @@ def restore_screen(meta):
     return done
 
 
+# Patrol 的两个固定端口:PatrolServer 8081 / PatrolAppServiceClient 8082。
+# 它们绑在**被测 app 进程**里(patrol 是 Flutter 插件),不是测试包里,
+# 所以 Home 键退到后台不会释放——必须 force-stop 进程本身。
+PATROL_PORTS = (8081, 8082)
+
+
+def android_pkg_holding_port(adb, serial, port):
+    """谁在 LISTEN 这个端口?返回包名,查不到返回 None。
+
+    /proc/net/tcp6 的第 2 列是 `本地地址:端口(十六进制)`,第 8 列是 uid;
+    拿 uid 去 `pm list packages --uid` 换包名。只认应用 uid(>= 10000),
+    系统进程占的端口不碰。
+    """
+    hexport = format(port, "04X")
+    rc, out, _ = run([adb, "-s", serial, "shell",
+                      "cat /proc/net/tcp6 /proc/net/tcp 2>/dev/null"],
+                     timeout=RESTORE_TIMEOUT)
+    if rc != 0 or not out:
+        return None
+    uid = None
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) < 8 or ":" not in cols[1]:
+            continue
+        if cols[1].rsplit(":", 1)[-1].upper() != hexport:
+            continue
+        # 0A = TCP_LISTEN,只收拾在监听的
+        if len(cols) > 3 and cols[3].upper() != "0A":
+            continue
+        try:
+            uid = int(cols[7])
+        except (ValueError, IndexError):
+            continue
+        break
+    if uid is None or uid < 10000:
+        return None
+    rc, out, _ = run([adb, "-s", serial, "shell",
+                      f"pm list packages --uid {uid}"], timeout=RESTORE_TIMEOUT)
+    if rc != 0 or not out:
+        return None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            return line[len("package:"):].split()[0]
+    return None
+
+
+def free_patrol_ports(meta):
+    """收尾:把还占着 Patrol 端口的被测 app force-stop 掉(仅 Android 真机)。
+
+    **为什么必须做**:PatrolServer 绑 8081 是在被测 app 的进程里。`release` 原本
+    只按 Home,而 Home 只是切后台、不杀进程,于是那个 app 会一直霸着 8081。
+    下一轮 Patrol 跑到这台设备上——**哪怕是另一个项目**——就会撞
+    `BindException: Address already in use`,instrumentation 起不来,
+    表现是 `Total: 0` + `Gradle test execution failed with code 1`。
+
+    这个症状极具迷惑性:它不指向端口、不指向设备,看着像被测项目自己的构建问题。
+    2026-09-16 实际踩到:一台 Pixel 5 在锁注册表里显示空闲,却因为另一个项目
+    (cn.jinzhijiang.zxrj)留下的 app 进程占着 8081,任何项目在上面都跑不起 Patrol,
+    排查花了半小时且一度怀疑是被测代码的问题。
+
+    模拟器不做:下个会话还要热复用,而模拟器上的端口冲突可以靠重启实例解决。
+    返回被停掉的包名列表。
+    """
+    dev = (meta or {}).get("device_id")
+    if not dev or (meta or {}).get("platform") != "android":
+        return []
+    if (meta or {}).get("kind") != "physical":
+        return []
+    adb = tool("adb")
+    if not adb:
+        return []
+    stopped = []
+    for port in PATROL_PORTS:
+        try:
+            pkg = android_pkg_holding_port(adb, dev, port)
+            if not pkg or pkg in stopped:
+                continue
+            rc, _, _ = run([adb, "-s", dev, "shell", "am", "force-stop", pkg],
+                           timeout=RESTORE_TIMEOUT)
+            if rc == 0:
+                stopped.append(pkg)
+        except Exception:  # noqa: BLE001
+            continue
+    return stopped
+
+
 def press_home(meta):
     """release 收尾第一步:按 Home 把被测 app 退到桌面(仅真机)。
 
@@ -1694,7 +1787,19 @@ def resolve_screen_off_ms(args):
 
 
 def finish_acquire(c, owner, project, created, booted, reused, args, warnings):
-    """收尾:亮屏解锁 + 放宽真机自动锁屏 → 输出结果 JSON(失败不影响分配结果)。"""
+    """收尾:清占用的 Patrol 端口 + 亮屏解锁 + 放宽真机自动锁屏 → 输出结果 JSON。
+
+    **交付前先清端口**,而不是只指望上一个会话 release 时清干净:会话崩在半路、
+    被 Ctrl-C 掐掉、或者压根绕过本 skill 直接 `patrol test` 的情况都真实存在,
+    那些路径一个 release 都不会走。而残留只要还在,新会话的 Patrol 就起不来,
+    报的还是完全不指向端口的 `Total: 0`。这一步约 100ms,是最后一道闸。
+    """
+    freed = free_patrol_ports({"device_id": c.get("device_id"),
+                               "platform": c.get("platform"),
+                               "kind": c.get("kind")})
+    if freed:
+        warnings.append(f"{c.get('device_id')}: 交付前清掉了占用 Patrol 端口的残留 app"
+                        f"({', '.join(freed)})——上一个会话没有正常 release")
     if args.no_wake:
         screen = {"attempted": False, "reason": "disabled_by_--no-wake"}
     else:
@@ -1927,6 +2032,9 @@ def tidy_unlocked_device(device_id, lock_screen_after, warnings):
     meta = infer_device(device_id, warnings)
     if not meta:
         return None
+    freed = free_patrol_ports(meta)
+    if freed:
+        log(f"{(meta or {}).get('device_id')}: 已停掉占用 Patrol 端口的 app({', '.join(freed)})")
     if lock_screen_after and press_home(meta):
         log(f"{device_id}: 已按 Home 退出前台 app(无锁记录,按孤儿设备收尾)")
     done = restore_screen(meta)
@@ -2190,6 +2298,9 @@ def cmd_clean(args):
             stale = state == "STALE"
         if stale and reclaim_path(path):
             removed.append(label)
+            freed = free_patrol_ports(meta)
+            if freed:
+                log(f"{(meta or {}).get('device_id')}: 已停掉占用 Patrol 端口的 app({', '.join(freed)})")
             press_home(meta)
             restore_screen(meta)
             lock_screen(meta)

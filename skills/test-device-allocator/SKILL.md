@@ -80,6 +80,42 @@ python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什�
 > 报 `device` 却不答话的机器直接跳过。但**它挡不住「还答得上话、干活却已经很勉强」
 > 的那一段**——上面那台掉线前就是这样。所以这条症状表仍然要用。
 
+### 症状:Patrol `Total: 0` + `BindException: Address already in use`
+
+**设备锁管的是设备占用,管不到端口。** 一台在 `status` 里显示空闲的手机,
+照样可能因为端口被占而跑不了 Patrol。
+
+`PatrolServer`(8081)与 `PatrolAppServiceClient`(8082)绑在**被测 app 的进程里**
+(patrol 是 Flutter 插件),不在测试包里。所以只要某个项目的被测 app 进程还活着,
+它就一直霸着这两个端口——**而 `release` 过去只按 Home,Home 只是切后台、不杀进程**。
+
+后果是跨项目的:下一轮 Patrol 跑到这台设备上,不管是哪个项目,都会
+
+```
+java.net.BindException: Address already in use
+  at io.ktor.network.sockets.TcpSocketBuilder.bind
+```
+
+instrumentation 起不来,CLI 只报 `Total: 0` + `Gradle test execution failed with code 1`。
+**这个症状不指向端口、不指向设备,看着像被测项目自己的构建问题。**
+
+2026-09-16 实际踩到:一台 Pixel 5 锁里显示空闲,却被另一个项目
+(`cn.jinzhijiang.zxrj`)遗留的 app 进程占着 8081,任何项目都跑不起 Patrol。
+先用本项目的用例失败,再用现有冒烟用例做对照也失败,才确认是环境;
+手工 `am instrument` 才拿到真正的 `BindException`。~30 分钟,一度怀疑是被测代码。
+
+**现在脚本会自动处理**(`acquire` 交付前 + `release`/陈旧锁回收/`clean` 收尾时各清一次):
+检查 8081/8082 上处于 **LISTEN** 的应用 uid(≥10000),映射回包名后 `am force-stop`。
+只碰真机、只碰 Android、只碰真在监听的应用进程;`TIME_WAIT` 之类的残留连接不误杀。
+
+⚠️ **这是对野外观察到的状态做防御性清理,不是对某条已知代码路径的修复。**
+正常结束的 Patrol 不泄漏,从宿主掐掉 CLI 也不泄漏——那次泄漏的确切成因没查清
+(设备掉线 / SIGKILL / `patrol develop` 都有可能)。所以手工排查时仍然要会看这个症状:
+
+```bash
+adb -s <id> shell "netstat -lnt | grep -E ':808[12]'"   # 有 LISTEN 就是它
+```
+
 ### 症状:点击落到别的 app / 应用反复被切走 / 截图拍到的是另一个 app
 
 **这不是设备坏了,也不是你的 app 崩了,是另一个会话正在用这台设备。**
@@ -136,7 +172,7 @@ python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什�
 |---|---|---|
 | `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
 | `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake` |
-| `release` | 释放锁(幂等,恒 exit 0);真机收尾:Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁。**`--device` 指向没有锁记录的设备时照样收尾**(记进 `tidied`),用来收拾绕过 acquire 或崩在半路留下的孤儿设备 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
+| `release` | 释放锁(幂等,恒 exit 0);真机收尾:**force-stop 占着 Patrol 端口(8081/8082)的 app** → Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁。**`--device` 指向没有锁记录的设备时照样收尾**(记进 `tidied`),用来收拾绕过 acquire 或崩在半路留下的孤儿设备 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
 | `status` | 设备 × 锁全景(排查谁占了什么) | `--device <id>` 只看这一台(碰设备前的一秒确认)、`--busy` 只列被别人锁着的 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
 
@@ -212,6 +248,10 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 `stay_on_while_plugged_in` 永久写成 7 且无人还原,正是本文排障表里「测试后手机一直亮屏」那一条。
 构建超长导致中途熄屏,用 `wake --key "$DEVICE_KEY"`,不要开常亮。
 
+**③ 端口残留会让下一个会话(任何项目)跑不起来。** `PatrolServer` 绑 8081 在被测 app 进程里,
+Home 不杀进程。`acquire` 交付前与 `release` 收尾时脚本都会 force-stop 占着 8081/8082 的应用进程,
+但这是防御性清理,不是根治——排查时仍要会看 `Total: 0` 这个症状,详见上面的症状小节。
+
 **② patrol MCP 不认设备锁。** `patrol-run` / `patrol-screenshot` **没有设备参数**,
 多台设备连着时:`patrol-run` 取「第一台」——很可能不是你 acquire 到的那台;
 `patrol-screenshot` 直接报 `more than one device/emulator` 失败。
@@ -236,6 +276,7 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 | exit 4 `NO_SYSTEM_IMAGE` | 复制 JSON `hint` 里的 sdkmanager 命令装镜像,再重跑 acquire |
 | exit 7 `BUSY` | `--device` 指定的设备被别的会话占用;去掉 `--device` 另挑,或 `status` 看占用者 |
 | exit 9 `MEMORY_PRESSURE` | 宿主可用内存低于 6GB 硬下限(第一台也拦),或已有模拟器在跑、内存不够再开一台。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)、退出大进程释放内存后重试;Android 可 `--memory 1024` 压小单台换配额(硬下限不受影响);确认有余量可 `--mem-override` 或调 `--max-emulators` |
+| `Total: 0` 且日志里有 `BindException: Address already in use` | **别的项目遗留的 app 进程占着 Patrol 的 8081/8082**,与设备锁无关(锁里可能显示空闲)。`adb -s <id> shell "netstat -lnt \| grep -E ':808[12]'"` 看有没有 LISTEN;`acquire`/`release` 现在会自动 force-stop,手工则 `am force-stop <占用包>`。详见上面的症状小节 |
 | 一整轮跑完 `Total: 0`(不是 `Failed: N`)/ 装包 `ShellCommandUnresponsiveException` / `INSTRUMENTATION_ABORTED` | **真机正在掉线,不是代码问题**。`adb devices` + `adb -s <id> shell echo ok` 一秒钟摘干净;确认后 `release` 再 `acquire` 换一台。acquire 的探测挡得住「不答话」,挡不住「答得上话但装包要几百秒」 |
 | 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
