@@ -47,6 +47,11 @@ JzjSkills/
 │   │   ├── LICENSE                      # MIT，随上游一并保留
 │   │   ├── references/                  # prompt-recipes、boundaries
 │   │   └── scripts/codex_image.py       # python3 标准库，驱动 codex exec 出图
+│   ├── eachlabs-gpt-image-skill/        # 自建：each::labs 上的 GPT Image v2.5 出图 / 改图
+│   │   ├── SKILL.md
+│   │   ├── agents/openai.yaml
+│   │   ├── references/                  # models.md（四个 slug 参数表）、troubleshooting.md
+│   │   └── scripts/gpt_image.py         # python3 标准库，提交→轮询→下载，本地图自动上传
 │   ├── aliyun-oss-ossutil/              # 外部引入：阿里云 OSS ossutil 2.0 命令行
 │   │   ├── SKILL.md
 │   │   ├── LICENSE                      # MIT，取自上游仓库根目录
@@ -123,6 +128,7 @@ description: 简短描述这个 skill 做什么
 | `sound-effects` | [awesome-genmedia/skills](https://github.com/awesome-genmedia/skills) | [sound-effects/](https://github.com/awesome-genmedia/skills/tree/main/sound-effects) | MIT | 2026-08-16 | 引入上游 `e4e641e`；上游把 skill 直接放在仓库根的同名目录下，`LICENSE` 取自仓库根。**带本地 patch**：上游用的 `eachsense-agent.core.eachlabs.run` 端点在余额充足时仍回 402 （对照实验：错 key 回 401、同一把 key 走标准 API 回 200，说明是那个 beta 服务看不到 workspace 余额），patch 在开头加了诊断表与「别去充值」的结论，补了**已验证可用的标准预测 API 兜底方案**（音效 `bytedance-seed-audio-1-0`、音乐 `ace-step-1-5-text-to-music`，含提交/轮询、一次只能跑一个预测的 429 限制、以及为什么不能用 ffmpeg `silenceremove` 去静音），并把 `allowed-tools` 从只放行 `curl` 放宽到 `curl/python3/ffmpeg/ffprobe`——否则兜底方案自己跑不起来 |
 
 | `springboot-jpa` | 自建 / 综合多方整理 | [vibeeval jpa-patterns](https://github.com/vibeeval/vibecosystem/blob/main/skills/jpa-patterns/SKILL.md)、[Amplicode spring-data-jpa](https://github.com/Amplicode/spring-skills/tree/main/skills/spring-data-jpa)、[Spring Data JPA 官方文档](https://docs.spring.io/spring-data/jpa/reference/jpa.html) | — | 2026-08-21 | 自建；写生产 JPA 代码的决策手册（测试归 `spring-jpa-testing`，通用工程惯例归 `java-springboot`）。综合三方资料**重写而非引入**：vibeeval 的 jpa-patterns（codelably、affaan-m/ECC 两个仓库是它的中文转译，内容相同）覆盖面广但每节都浅；Amplicode 的 spring-data-jpa 取其「先探测项目既有约定再写码」思想与实体实现规则（proxy-safe equals/hashCode、Set vs List、显式命名），但其 repository/transaction 参考在上游是 0 字节占位文件且 SKILL.md 绑定自家 IntelliJ MCP 插件，不可原样引入；API 细节以 Spring Data JPA 4.1.0 官方文档校准（标注 3.1+/4.0+ 版本门槛）。SKILL.md 给默认决策表 + 高频事故速查，细节沉到 references/ 5 个文件（实体设计、关联与 N+1、Repository 与查询、事务与锁、性能与配置） |
+| `eachlabs-gpt-image-skill` | 自建 / 参照 [eachlabs/skills](https://github.com/eachlabs/skills) 的 `gpt-image-v2` 改写 | [skills/gpt-image-v2/](https://github.com/eachlabs/skills/tree/main/skills/gpt-image-v2)、[each::labs 文档](https://docs.eachlabs.ai)（经 `eachlabs-mcp` 查阅） | — | 2026-09-18 | 自建；上游那份是给 **v2** 写的，2.5 换了一整套模型（`gpt-image-v2-5-{flare,sunburst}-{text-to-image,edit}` 四个 slug），参数、计价、限流全变了，所以**重写而非引入**。四份 `request_schema` 从 `GET /v1/models/<slug>` 实时拉取后落到 `references/models.md`，并用 $0.037 真实调用验证了文生图、改图（含 presign+PUT 上传本地图）、透明背景、自定义尺寸四条链路。顺手纠了上游三处错：`GET /v1/model?slug=` 实测 404（正确是 `GET /v1/models/<slug>`）、`output` 在单图时是**字符串**不是数组、限流不是「100 次/分钟」而是**并发闸门**（余额 ≤$10 时这类算不出价的模型只给 2 个在飞，且实测循环重试会一直把闸门按住，停手 89 秒才放行）。`scripts/gpt_image.py`（python3 标准库）提供 generate / edit / upload / status / balance / schema，内部替你处理「文生图叫 `size`、改图叫 `image_size`」这个最容易踩的参数名差异 |
 
 ## 更新已引入的 Skill
 

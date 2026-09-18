@@ -1,0 +1,4 @@
+interface:
+  display_name: "EachLabs GPT Image v2.5"
+  short_description: "用 each::labs 调 GPT Image v2.5 出图/改图，提交→轮询→下载一把梭"
+  default_prompt: "Use $eachlabs-gpt-image-skill to generate or edit an image with GPT Image v2.5."
