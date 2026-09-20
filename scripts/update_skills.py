@@ -91,10 +91,29 @@ def select(manifest: dict, names: list[str], source_id: str | None) -> list[tupl
     for source in manifest["sources"]:
         if source_id and source["id"] != source_id:
             continue
-        picked = [s for s in source["skills"] if not names or s["name"] in names]
+        # `retired: true` = 已并入别的 skill,上游不再同步。**必须在这里挡住** ——
+        # 否则一次全量同步会把已经删掉的目录重新拉回来,悄悄复活一个重复的 skill。
+        # 显式点名时给出提示而不是静默跳过,免得人以为同步成功了。
+        picked = []
+        for s in source["skills"]:
+            if names and s["name"] not in names:
+                continue
+            if s.get("retired"):
+                if names:
+                    log(f"[跳过] {s['name']} 已并入 {s.get('merged_into') or '别处'},不再自动同步")
+                continue
+            picked.append(s)
         if picked:
             selected.append((source, picked))
     if not selected:
+        # 区分两种空:被 --source 筛没了,还是点名的都已 retired。
+        # 之前这里一律报「没有匹配的来源: --source None」,看着像脚本坏了。
+        if names and all(
+            s.get("retired")
+            for src in manifest["sources"] for s in src["skills"] if s["name"] in names
+        ):
+            log("[完成] 点名的 skill 都已并入别处,没有需要同步的。")
+            sys.exit(0)
         log(f"[错误] 没有匹配的来源: --source {source_id}")
         sys.exit(EXIT_USAGE)
     return selected

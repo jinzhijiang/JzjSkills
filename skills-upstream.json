@@ -177,11 +177,9 @@
         {
           "name": "sound-effects",
           "src": "sound-effects",
-          "extra": {
-            "LICENSE": "LICENSE"
-          },
-          "patch": "patches/sound-effects.patch",
-          "note": "上游把 skill 直接放在仓库根的同名目录下;patch 加了 402 诊断与标准 API 兜底方案,并放宽 allowed-tools。"
+          "retired": true,
+          "merged_into": "eachlabs-skill",
+          "note": "2026-09-20 已并入自建的 `eachlabs-skill` —— sound-effects 本来就是 each::labs 的一部分,拆成两个 skill 会让「同一套提交-轮询机制、同一个并发闸门」的事实重复两遍且容易漂。内容落在 skills/eachlabs-skill/references/audio.md,上游 MIT LICENSE 保留在 skills/eachlabs-skill/LICENSE。**不再自动同步**:上游后续更新要手动看。并入时顺带订正了上游两处过时:它写的 BGM 模型 `ace-step-1-5-text-to-music` 已不在目录里,且「出音频的只有三个模型」实测是 10 个。"
         }
       ]
     }

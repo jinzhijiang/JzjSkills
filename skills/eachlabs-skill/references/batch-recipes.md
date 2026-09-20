@@ -59,7 +59,7 @@ no rounded-square card behind it.
 > 主体要绿的、要洋红的都随便。
 >
 > 这条值得单独记，因为迁移时会下意识带上旧约束：本次实际发出去的提示词末尾就多了一句
-> `No green.`（可从 `gpt_image.py status <id>` 把原 prompt 读回来核对）。它不但没用，
+> `No green.`（可从 `eachlabs.py status <id>` 把原 prompt 读回来核对）。它不但没用，
 > 还白白掐掉了一个配色选项。
 
 ## 3. 批量脚本的四条骨架

@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""gpt_image.py — eachlabs 上的 GPT Image v2.5 一把梭：提交 → 轮询 → 落地。
+"""eachlabs.py — each::labs 一把梭：提交 → 轮询 → 下载。
 
-用法:
-  python3 gpt_image.py generate "<prompt>" [--model flare|sunburst] [--size ...] [...]
-  python3 gpt_image.py edit "<prompt>" --image <本地路径|URL> [--image ...] [--mask ...]
-  python3 gpt_image.py upload <本地文件>...          # 只上传，打印 public_url
-  python3 gpt_image.py status <prediction_id>
-  python3 gpt_image.py balance
-  python3 gpt_image.py schema [flare|sunburst|<完整 slug>]
+图 / 视频 / 音频三类共用同一套机制，只换 slug 与 input。
 
-为什么要脚本而不是直接 curl:
-  - 文生图的分辨率参数叫 size,编辑的叫 image_size。手写 JSON 极易串,串了直接 400。
-  - 编辑的 image_urls 必须是**公网可达 URL**,本地图要先走 presign+PUT 传到 each::storage。
-    脚本对 --image 自动判断:本地路径就先传,URL 直接用。
-  - 预测是异步的,要轮询到终态再去 output 取 URL,再下载成本地文件。
-  - 402/429 是余额与并发闸门,不是「再试一次」就能过的,脚本直接把可执行结论打出来。
+  python3 eachlabs.py generate "<prompt>" [--model flare|sunburst] [--size ...]
+  python3 eachlabs.py edit     "<prompt>" --image <本地路径|URL> [--image ...] [--mask ...]
+  python3 eachlabs.py video    "<prompt>" --first-frame <图> [--loop] [--duration 2]
+  python3 eachlabs.py sfx      "<prompt>" [--loudness 30]
+  python3 eachlabs.py bgm      "<prompt>" [--model bgm-minimax] [--instrumental 1]
+  python3 eachlabs.py models   [--output-type image|video|audio] [--grep 关键字]
+  python3 eachlabs.py upload   <本地文件>...          # 只上传，打印 public_url
+  python3 eachlabs.py status   <prediction_id>
+  python3 eachlabs.py balance
+  python3 eachlabs.py schema   [flare|sunburst|<完整 slug>]
 
-stdout 只输出机读结果(--json 时是单行 JSON,否则是落地文件路径,一行一个);
-人读过程信息全部走 stderr。仅用 python3 标准库。
-凭据从环境变量 EACHLABS_API_KEY 读。
+只依赖 python3 标准库。凭据取自环境变量 EACHLABS_API_KEY。
 """
 
 import argparse
@@ -55,6 +51,26 @@ SIZES = [
 QUALITIES = ["low", "medium", "high", "xhigh", "max", "auto"]
 FORMATS = ["png", "jpeg", "webp"]
 BACKGROUNDS = ["opaque", "transparent", "auto"]
+
+# 视频与音频不是「另一个平台」,是同一套提交/轮询,只换 slug 与 input。
+# 别背清单 —— `models --output-type video` 能实时筛出当前可用的。
+VIDEO_MODELS = {
+    # 首末帧可控、时长可选。实测 2 秒 60 帧 720P 约 $0.20,60–120 秒出片。
+    "wan": "alibaba-wan-3-0-image-to-video",
+    # 有 camera_motion:'static' 这个显式旋钮,但**最短 6 秒**,做短循环用不上。
+    "ltx": "ltx-2-5-image-to-video-fast",
+}
+# 2026-09-20 实测目录:出音频的有 10 个模型(旧 sound-effects 文档写"只有三个",已过时),
+# 且它写的 BGM 模型 `ace-step-1-5-text-to-music` **已经不在目录里了**。
+# 所以别把 slug 背死 —— 用 `models --output-type audio` 现查。
+AUDIO_MODELS = {
+    # 纯文本出任意音频。参数像 TTS,但实测能出孤立瞬态(1.6s 文件里一个 0.15s 的木头敲击)。
+    # 有 loudness_rate(-50~100),**从源头治"出来太轻",比事后加增益好** —— 加增益会把底噪一起放大。
+    "sfx": "bytedance-seed-audio-1-0",
+    # 音乐。两个都**没有 duration / bpm**(实测 schema),别照旧文档传。
+    "bgm": "lyria-3-5",              # prompt-only,最简单
+    "bgm-minimax": "minimax-music-03",  # 有 is_instrumental / lyrics
+}
 
 TERMINAL_OK = {"success"}
 TERMINAL_BAD = {"error", "cancelled", "failed"}
@@ -259,7 +275,7 @@ def download(url, out_dir, stem, index, total):
     name = "%s%s%s" % (stem, "" if total == 1 else "-%d" % (index + 1), ext)
     dest = os.path.join(out_dir, name)
     # 图已经出来了、钱也已经花了,这一步再挂掉最冤,所以重试。GET 幂等,重试无副作用。
-    req = urllib.request.Request(url, headers={"User-Agent": "gpt_image.py"})
+    req = urllib.request.Request(url, headers={"User-Agent": "eachlabs.py"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
@@ -323,7 +339,7 @@ def run_and_collect(slug, payload_input, args, stem_prefix):
     data = poll(pid, timeout=args.timeout, interval=args.interval)
     urls = output_urls(data)
     if not urls:
-        die("预测成功但没取到图片 URL,原始 output: %s" % json.dumps(data.get("output"), ensure_ascii=False))
+        die("预测成功但没取到产物 URL,原始 output: %s" % json.dumps(data.get("output"), ensure_ascii=False))
     stem = "%s-%s" % (stem_prefix, datetime.now().strftime("%Y%m%d-%H%M%S"))
     files = [download(u, args.out, stem, i, len(urls)) for i, u in enumerate(urls)]
     metrics = data.get("metrics") or {}
@@ -355,6 +371,89 @@ def cmd_edit(args):
     if args.mask:
         payload["mask_url"] = resolve_image(args.mask)
     run_and_collect(slug, payload, args, "gpt-image-%s-edit" % args.model)
+
+
+def cmd_video(args):
+    """图生视频。做循环动画时把 --last-frame 设成与 --first-frame 同一张 —— 循环自然闭合。"""
+    slug = VIDEO_MODELS.get(args.model, args.model)
+    payload = {"prompt": args.prompt}
+    log("解析首帧…")
+    payload["first_frame"] = resolve_image(args.first_frame)
+    if args.last_frame:
+        log("解析末帧…")
+        payload["last_frame"] = resolve_image(args.last_frame)
+    elif args.loop:
+        # 循环闭合:末帧就是首帧,动作必然收回原位。已经上传过,直接复用同一个 URL。
+        payload["last_frame"] = payload["first_frame"]
+        log("  --loop:末帧 = 首帧,循环闭合")
+    if args.duration:
+        payload["duration"] = args.duration
+    if args.resolution:
+        payload["resolution"] = args.resolution
+    if args.ratio:
+        payload["ratio"] = args.ratio
+    if args.audio is not None:
+        payload["audio"] = args.audio
+    if args.prompt_extend is not None:
+        payload["prompt_extend"] = args.prompt_extend
+    for kv in args.extra or []:
+        k, _, v = kv.partition("=")
+        try:
+            payload[k] = json.loads(v)
+        except Exception:
+            payload[k] = v
+    run_and_collect(slug, payload, args, "video-%s" % args.model)
+
+
+def cmd_audio(args):
+    """音效 / BGM。**原始输出前后带静音、电平偏低,后处理不可省** —— 见 references/audio.md。"""
+    kind = args.kind
+    slug = AUDIO_MODELS.get(getattr(args, "model", None) or kind, AUDIO_MODELS[kind])
+    payload = {"prompt": args.prompt}
+    if kind == "sfx" and args.loudness is not None:
+        # 与其事后放大(会把底噪一起放大),不如让模型出得响一些。
+        payload["loudness_rate"] = args.loudness
+    if kind == "bgm" and args.instrumental is not None:
+        # 只有 minimax-music-03 吃这个字段;lyria 只认 prompt。
+        payload["is_instrumental"] = args.instrumental
+    for kv in args.extra or []:
+        k, _, v = kv.partition("=")
+        try:
+            payload[k] = json.loads(v)
+        except Exception:
+            payload[k] = v
+    run_and_collect(slug, payload, args, kind)
+    log("  提醒:原始音频前后带静音、电平偏低。上线前务必掐头去尾 + 归一化,")
+    log("  且**别用 ffmpeg 的 silenceremove**(按绝对 dB 判,底噪逐次不同)。见 references/audio.md。")
+
+
+def cmd_models(args):
+    """按产出类型筛模型 —— 目录会变,别把 slug 背死在文档里。"""
+    status, payload = request("GET", API_BASE + "/models?limit=2000")
+    if status != 200:
+        die(explain_http_error(status, payload, "拉模型目录"))
+    # 实测这个端点**直接返回数组**,不是 {"data": [...]}。两种都兜住。
+    items = payload if isinstance(payload, list) else (
+        payload.get("data") or payload.get("models") or [])
+    if not isinstance(items, list):
+        die("模型目录形状意外: %s" % json.dumps(payload, ensure_ascii=False)[:300])
+    rows = []
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        ot = str(m.get("output_type") or "")
+        if args.output_type and args.output_type.lower() not in ot.lower():
+            continue
+        slug = m.get("slug") or m.get("id") or m.get("name")
+        if args.grep and args.grep.lower() not in str(slug).lower():
+            continue
+        cat = m.get("category")
+        if isinstance(cat, dict):
+            cat = cat.get("Name") or cat.get("Slug") or ""
+        rows.append((str(slug), ot, str(cat or "")))
+    for slug, ot, cat in sorted(rows):
+        print("%-52s %-8s %s" % (slug, ot, cat))
+    log("共 %d 个" % len(rows))
 
 
 def cmd_upload(args):
@@ -391,6 +490,17 @@ def cmd_schema(args):
         print("cost: %s" % json.dumps(payload.get("cost"), ensure_ascii=False))
 
 
+def add_io(p):
+    """落地与轮询相关的参数 —— 图片/视频/音频三类共用。"""
+    p.add_argument("--out", default=".", help="落地目录,默认当前目录")
+    p.add_argument("--timeout", type=int, default=1800, help="轮询超时秒数(视频要留足)")
+    p.add_argument("--interval", type=int, default=5, help="轮询间隔秒数,默认 5")
+    p.add_argument("--no-wait", action="store_true", help="只提交,打印 prediction ID 就退出")
+    p.add_argument("--webhook", help="webhook_url,配了仍会轮询,除非同时给 --no-wait")
+    p.add_argument("--json", action="store_true", help="stdout 输出单行 JSON")
+    p.add_argument("-n", "--n", type=int, default=1, help=argparse.SUPPRESS)
+
+
 def add_common(p):
     p.add_argument("prompt", help="提示词,最长 32000 字符")
     p.add_argument("--model", choices=sorted(MODELS), default="flare",
@@ -412,8 +522,9 @@ def add_common(p):
 
 def main():
     ap = argparse.ArgumentParser(
-        prog="gpt_image.py",
-        description="eachlabs 上的 GPT Image v2.5:文生图 / 图生图编辑。",
+        prog="eachlabs.py",
+        description="each::labs:图片(GPT Image v2.5)/ 视频(图生视频)/ 音频(音效与 BGM)。"
+                    "三类共用同一套提交-轮询机制,详见 SKILL.md。",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -428,6 +539,50 @@ def main():
     e.add_argument("--mask", metavar="本地路径|URL",
                    help="可选 inpaint 蒙版:PNG 带 alpha,尺寸与第一张源图一致,全透明处才会被改")
     e.set_defaults(func=cmd_edit)
+
+    v = sub.add_parser("video", help="图生视频(做帧动画用它,不要让图像模型直接画帧表)")
+    v.add_argument("prompt")
+    v.add_argument("--model", default="wan",
+                   help="wan(默认,首末帧可控)|ltx(有 static 但最短 6 秒)|完整 slug")
+    v.add_argument("--first-frame", required=True, metavar="本地路径|URL",
+                   help="起始帧;本地文件会自动上传")
+    v.add_argument("--last-frame", metavar="本地路径|URL", help="末帧")
+    v.add_argument("--loop", action="store_true",
+                   help="末帧 = 首帧,循环天然闭合,动作必然收回原位(做精灵表就用它)")
+    v.add_argument("--duration", type=float, help="秒")
+    v.add_argument("--resolution", help="如 720P")
+    v.add_argument("--ratio", help="宽高比")
+    v.add_argument("--audio", type=lambda x: x.lower() in ("1", "true", "yes"),
+                   help="出不出声轨;做帧动画关掉")
+    v.add_argument("--prompt-extend", type=lambda x: x.lower() in ("1", "true", "yes"),
+                   help="服务端扩写提示词;要精确控制时关掉")
+    v.add_argument("--extra", action="append", metavar="k=v", help="透传其它 input 字段")
+    add_io(v)
+    v.set_defaults(func=cmd_video)
+
+    for kind, helptext in (("sfx", "音效(撞击/UI/foley/环境声)"), ("bgm", "背景音乐")):
+        a = sub.add_parser(kind, help=helptext)
+        a.add_argument("prompt")
+        if kind == "sfx":
+            a.add_argument("--loudness", type=int, metavar="-50..100",
+                           help="loudness_rate:让模型直接出得更响。"
+                                "比事后加增益好 —— 加增益会把底噪一起放大")
+            a.set_defaults(instrumental=None)
+        else:
+            a.add_argument("--model", choices=["bgm", "bgm-minimax"], default="bgm",
+                           help="bgm=lyria-3-5(prompt-only) | bgm-minimax=minimax-music-03")
+            a.add_argument("--instrumental", type=lambda x: x.lower() in ("1", "true", "yes"),
+                           help="纯器乐(仅 minimax 吃这个字段)")
+            a.set_defaults(loudness=None)
+        a.add_argument("--extra", action="append", metavar="k=v",
+                       help="透传其它 input 字段。**两个音乐模型都没有 duration/bpm**")
+        add_io(a)
+        a.set_defaults(func=cmd_audio, kind=kind)
+
+    ml = sub.add_parser("models", help="按产出类型筛模型(目录会变,别背 slug)")
+    ml.add_argument("--output-type", help="image|video|audio …")
+    ml.add_argument("--grep", help="slug 关键字")
+    ml.set_defaults(func=cmd_models)
 
     u = sub.add_parser("upload", help="只把本地文件传到 each::storage,打印 public_url")
     u.add_argument("files", nargs="+")

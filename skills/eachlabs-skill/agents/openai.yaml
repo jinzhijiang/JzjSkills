@@ -1,0 +1,4 @@
+interface:
+  display_name: "each::labs（图 / 视频 / 音频）"
+  short_description: "用 each::labs 出图、出视频、出音效与 BGM，提交→轮询→下载一把梭"
+  default_prompt: "Use $eachlabs-skill to generate an image, a video clip, or a sound effect via each::labs."

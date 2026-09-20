@@ -1,19 +1,27 @@
-# GPT Image v2.5 —— 四个 slug 的完整参数表
+# 模型与参数表
 
-所有 slug 都走 `POST https://api.eachlabs.ai/v1/prediction`，`output_type` 在目录里标的是 `array`。
-本文档的 schema 于 **2026-09-18** 从 `GET https://api.eachlabs.ai/v1/models/<slug>` 实时拉取。
-schema 随时可能变，**以线上为准**：
+> **别把 slug 背死在这份文档里。** 目录会变 —— 实测上游 sound-effects 写的
+> `ace-step-1-5-text-to-music` 已经不在目录里，而它说「出音频的只有三个模型」时实际有 10 个。
+> 现查：`python3 scripts/eachlabs.py models --output-type image|video|audio`。
+
+## 三类速查
+
+| 类别 | 常用 slug | 详述 |
+|---|---|---|
+| 图片 | `gpt-image-v2-5-{flare,sunburst}-{text-to-image,edit}` | 本页下半 + [image.md](image.md) |
+| 视频 | `alibaba-wan-3-0-image-to-video`（首末帧可控）、`ltx-2-5-image-to-video-fast`（最短 6 秒） | [video.md](video.md) |
+| 音频 | `bytedance-seed-audio-1-0`（音效）、`lyria-3-5` / `minimax-music-03`（音乐） | [audio.md](audio.md) |
+
+**拉任意模型的实时 schema 与计价**（不花钱、不需鉴权）：
 
 ```bash
-python3 scripts/gpt_image.py schema flare       # 打印文生图 + 编辑两份 schema 与计价
-python3 scripts/gpt_image.py schema sunburst
-curl -s https://api.eachlabs.ai/v1/models/gpt-image-v2-5-flare-edit | python3 -m json.tool
+python3 scripts/eachlabs.py schema <完整 slug>
+curl -s https://api.eachlabs.ai/v1/models/<slug> | python3 -m json.tool
 ```
 
-`GET /v1/models/<slug>` **不需要鉴权**，随便查不花钱。
-注意上游 `eachlabs/skills` 里那个 v2 skill 写的 `GET /v1/model?slug=<slug>` 是错的，实测回 404。
-
 ---
+
+# GPT Image v2.5 —— 四个 slug 的完整参数表
 
 ## 选型
 
@@ -57,7 +65,7 @@ Flare 与 Sunburst 的**参数完全一样**，只有取舍不同：Flare 快，
 | `quality` / `output_format` / `background` / `output_compression` / `num_images` / `moderation` | | | 同文生图 | |
 
 > 文生图 `size` vs 编辑 `image_size` 是这两个 schema 唯一的差异，也是手写 JSON 最容易踩的坑。
-> `additionalProperties: false`，传错名字就是 400。`scripts/gpt_image.py` 统一用 `--size`，内部按子命令映射。
+> `additionalProperties: false`，传错名字就是 400。`scripts/eachlabs.py` 统一用 `--size`，内部按子命令映射。
 
 ---
 
@@ -102,7 +110,7 @@ Flare 与 Sunburst 的**参数完全一样**，只有取舍不同：Flare 快，
 读结算值的两个端点**字段名不同**（同一个数字）：单条 `GET /v1/prediction/{id}` 读
 `metrics.cost` / `metrics.predict_time`；列表 `GET /v2/executions?limit=N` 读顶层的
 `execution_cost` / `run_time`——列表里**没有** `metrics`，查一批账要走列表端点。
-`gpt_image.py` 每跑完一次会把单条的两个值打到 stderr。
+`eachlabs.py` 每跑完一次会把单条的两个值打到 stderr。
 
 ---
 
@@ -117,7 +125,7 @@ Flare 与 Sunburst 的**参数完全一样**，只有取舍不同：Flare 快，
 ```
 
 写解析代码时两种都要兜住（上游那份 v2 skill 直接写"output（URL 数组）"，照抄会炸）。
-`gpt_image.py` 的 `output_urls()` 已经同时处理 str / list / dict。
+`eachlabs.py` 的 `output_urls()` 已经同时处理 str / list / dict。
 
 产物 URL 落在 `cdn-us.eachlabs.ai`，公开可读（链接即权限），默认保留 180 天。
 

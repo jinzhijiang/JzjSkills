@@ -22,7 +22,7 @@
 拿不准就对一遍线上 schema（不花钱、不需鉴权）：
 
 ```bash
-python3 scripts/gpt_image.py schema flare
+python3 scripts/eachlabs.py schema flare
 ```
 
 ## 401 —— 鉴权
@@ -90,7 +90,7 @@ python3 -c "import os; k=os.environ.get('EACHLABS_API_KEY',''); print('len', len
 也就是说在飞数为 0、间隔 90 秒仍然会被拒——闸门统计的不是"此刻在飞几个"，
 把 `--gap` 从 45 调到 90 再调到 180 纯属浪费时间。**余额过 $10 这条限制直接消失**，
 文档里那句"balance of $10.00 or less"是字面意义上的开关。
-所以成套出图前先 `gpt_image.py balance` 看一眼；不够就充，比调参省事得多。
+所以成套出图前先 `eachlabs.py balance` 看一眼；不够就充，比调参省事得多。
 批量脚本仍然要能续跑，见 [batch-recipes.md](batch-recipes.md#3-批量脚本的四条骨架)。
 
 排查有没有真的卡住的在飞任务：
@@ -122,7 +122,7 @@ else:
     fail(blob)                                # 真错误，原样抛出
 ```
 
-`gpt_image.py` 自身的 HTTP 层已经对断连重试；这段是给**外层批量脚本**用的，
+`eachlabs.py` 自身的 HTTP 层已经对断连重试；这段是给**外层批量脚本**用的，
 因为它看到的只是子进程的退出码和输出。
 
 ## 预测成功，但代码没拿到图
@@ -162,7 +162,7 @@ curl -X PUT "$PRESIGNED_URL" -H "Content-Type: image/png" \
 上限 100MB/文件，默认保留 180 天（`expires_in_seconds` 可调，60 秒 – 365 天）。
 `public_url` 里的 id 猜不出来，但**拿到链接的人都能看**——当公开链接对待。
 
-`scripts/gpt_image.py` 的 `--image` / `--mask` 传本地路径会自动走完这两步。
+`scripts/eachlabs.py` 的 `--image` / `--mask` 传本地路径会自动走完这两步。
 
 ## 透明背景
 
