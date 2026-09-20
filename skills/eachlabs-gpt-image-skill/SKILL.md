@@ -1,6 +1,6 @@
 ---
 name: eachlabs-gpt-image-skill
-description: 用 each::labs 的预测 API 调 OpenAI GPT Image v2.5 出图与改图，四个 slug（Flare 快款 / Sunburst 高保真款 × 文生图 / 编辑）。Use when 要生成图片、海报、产品图、封面、带精确文字的图，或要按指令改一张已有图（换背景、局部重绘 inpaint、多图合成、保持主体一致），或提到 gpt-image、GPT Image 2.5、gpt-image-v2-5、eachlabs 生图、each::labs 图片 API、EACHLABS_API_KEY 出图。脚本 scripts/gpt_image.py 把提交→轮询→下载一把梭，本地图自动传到 each::storage。NOT for 纯矢量 SVG / 代码能画的图标、走 codex 订阅额度出图（用 codex-image）、音频与视频生成（用 sound-effects）。
+description: 用 each::labs 的预测 API 调 OpenAI GPT Image v2.5 出图与改图，四个 slug（Flare 快款 / Sunburst 高保真款 × 文生图 / 编辑）。Use when 要生成图片、海报、产品图、封面、带精确文字的图，或要按指令改一张已有图（换背景、局部重绘 inpaint、多图合成、保持主体一致），或提到 gpt-image、GPT Image 2.5、gpt-image-v2-5、eachlabs 生图、each::labs 图片 API、EACHLABS_API_KEY 出图。脚本 scripts/gpt_image.py 把提交→轮询→下载一把梭，本地图自动传到 each::storage。要一次出一整套图标/素材（共享风格段保一致、批量可续跑、429 闸门、magick 后处理）也用它，见 references/batch-recipes.md。NOT for 纯矢量 SVG / 代码能画的图标、走 codex 订阅额度出图（用 codex-image）、音频与视频生成（用 sound-effects）。
 ---
 
 # GPT Image v2.5（each::labs）
@@ -62,11 +62,15 @@ python3 $S schema flare            # 拉实时 schema 与计价（不花钱、�
 再把原始字节 `PUT` 上去（`required_headers` 要一字不差带上）。presigned URL 只活 **15 分钟**。
 脚本的 `--image` 自动判断：URL 直接用，本地路径先传。
 
-**④ 余额 ≤ $10 时，这个模型只给 2 个并发。** GPT Image v2.5 事前定不了价
-（`cost.type=usage_based` 且金额全 `null`），属于平台口中"跑之前算不出钱"的那一类，
-并发上限是 **2**（不是固定价模型的 10）。429 的 `details` 会写明数字。
-更坑的是**循环重试解不开它、看起来还会一直把它按住**：实测在 0 在飞的情况下每 20–45 秒重试一次，
-连撞 7 次 429；停手 89 秒后再发一次就过了。所以撞 429 就**停手等 1–2 分钟**，别写退避重试循环。
+**④ 余额 ≤ $10 时，这个模型只给 2 个并发——而解法是充值，不是调间隔。**
+GPT Image v2.5 事前定不了价（`cost.type=usage_based` 且金额全 `null`），属于平台口中
+"跑之前算不出钱"的那一类，并发上限是 **2**（不是固定价模型的 10）。429 的 `details` 会写明数字。
+
+两个反直觉的点，都是实测：**循环重试解不开它、还会一直把它按住**（0 在飞时每 20–45 秒重试，
+连撞 7 次 429；停手 89 秒后单发一次就过）；**严格顺序单发也不保险**——$5.94 余额下间隔
+45s / 90s / 150s 一律被拒，而**充到 $25.75 后 15s 间隔连发 7 张零拒绝**。
+所以：补一两张图就停手等 1–2 分钟；要连出一套，先 `balance` 看一眼，不够就充。
+别写退避重试循环，也别花时间调 `--gap`。
 
 ## 4. 不想用脚本，直接 curl
 
@@ -104,10 +108,24 @@ curl -s -H "Authorization: Bearer $EACHLABS_API_KEY" "https://api.eachlabs.ai/v1
 - **构图**：主体、取景、镜头、光线分开写，别堆形容词。
 - **写实**：给物理线索（"45° 斜射硬光，边缘衰减柔和"）比写"高质量、大师作品"有用。
 - **改图**：把**不许变的东西**写清楚——"杯子的角度、标签朝向、玻璃上的反光保持完全一致，只换背景"。
+- **透明背景**：`--background transparent` 给的是真 alpha，但模型仍会自作主张垫一张圆角卡片
+  或一块地面。要在提示词里**显式否定**：`Single centred object filling the frame, NOTHING else.
+  Completely transparent background, no backdrop, no ground, no shadow plane, no rounded-square
+  card behind it.`（和 `codex-image` 不同，这里**不是**绿幕抠图，主体可以含绿色。）
+- **一次出一套**（成套图标、并排素材）：把提示词切成"共享 STYLE 段 + 每张一句主体"，
+  共享段**逐字复制**到每一条前面。失败模式是"这一组不像一套"，而单看一张看不出来。
+  详见 [references/batch-recipes.md](references/batch-recipes.md)。
 - **省钱**：`quality=low` 先出草稿定构图，满意了再用同一段提示词跑 `high`/`xhigh`。
-  实测 low 的 1024×1024 只要 **$0.006 / 7.5 秒**，而且成品往往已经能直接用。
+  实测 low 的 1024×1024 中位 **$0.0066 / 9.3 秒**（n=34）。但别默认"low 只是草稿"——
+  一次 16 张商店图标全用 low，**一张没返工**直接上线。编辑比文生图**贵约 4 倍、慢约 2 倍**，
+  能重出就别改。
 
 ## 6. 出问题看这里
 
 [references/troubleshooting.md](references/troubleshooting.md)：400 / 401 / 402 / 429、
-预测成功但没有图、透明背景出来是黑的、自定义尺寸被拒、上传 403 签名不匹配。
+断连被误判成限流、预测成功但没有图、透明背景出来是黑的、自定义尺寸被拒、上传 403 签名不匹配、
+查账（两个端点字段名不一样）。
+
+[references/batch-recipes.md](references/batch-recipes.md)：**一次出一套图**——
+共享 STYLE 段保一致性、透明背景的显式否定、批量脚本的四条骨架（顺序 / 可续跑 /
+断连与 429 分流 / 退出码陷阱）、两条 magick 后处理配方、拼接触印相时 `montage` 的字体坑。

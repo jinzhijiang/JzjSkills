@@ -76,8 +76,18 @@ def api_key():
     return key
 
 
-def request(method, url, body=None, headers=None, raw_body=None, timeout=120):
-    """返回 (status, 解析后的 JSON 或 bytes)。不抛 HTTPError,把错误体也带回来。"""
+def request(method, url, body=None, headers=None, raw_body=None, timeout=120,
+            retries=2):
+    """返回 (status, 解析后的 JSON 或 bytes)。不抛 HTTPError,把错误体也带回来。
+
+    `retries` 只对**传输层**失败生效(连接被掐、SSL EOF、DNS、超时),不对 HTTP 状态码生效
+    ——HTTPError 是服务端深思熟虑后的回答,重试它没有意义,429 更是越重试越糟。
+    实测 api.eachlabs.ai 会不定时掐连接(`SSL: UNEXPECTED_EOF_WHILE_READING`),
+    不兜住的话一批图会在中途整个挂掉,而且报错长得很像限流、容易误诊。
+
+    ⚠️ 非幂等的请求(创建预测)必须传 retries=0:连接在服务端已受理后才断的话,
+    重试会再建一个预测、再扣一次钱。
+    """
     hdrs = dict(headers or {})
     data = None
     if raw_body is not None:
@@ -86,15 +96,23 @@ def request(method, url, body=None, headers=None, raw_body=None, timeout=120):
         data = json.dumps(body).encode("utf-8")
         hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = resp.read()
-            status = resp.getcode()
-    except urllib.error.HTTPError as e:
-        payload = e.read()
-        status = e.code
-    except urllib.error.URLError as e:
-        die("网络不通: %s" % e.reason)
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = resp.read()
+                status = resp.getcode()
+            break
+        except urllib.error.HTTPError as e:      # 必须排在 URLError 前面:它是其子类
+            payload = e.read()
+            status = e.code
+            break
+        except (urllib.error.URLError, OSError) as e:
+            reason = getattr(e, "reason", e)
+            if attempt >= retries:
+                die("网络不通: %s（已重试 %d 次）" % (reason, retries))
+            wait = 5 * (attempt + 1)
+            log("  连接失败(%s),%ds 后重试 %d/%d …" % (reason, wait, attempt + 1, retries))
+            time.sleep(wait)
     try:
         return status, json.loads(payload.decode("utf-8"))
     except Exception:
@@ -175,7 +193,10 @@ def create_prediction(slug, payload_input, webhook_url=None):
     body = {"model": slug, "version": "0.0.1", "input": payload_input}
     if webhook_url:
         body["webhook_url"] = webhook_url
-    status, payload = request("POST", API_BASE + "/prediction", body=body, headers=auth_headers())
+    # retries=0:这是唯一非幂等的调用。连接若在服务端已受理后才断,重试就会多建一个
+    # 预测、多扣一次钱。宁可失败,并告诉用户先去查一眼有没有已经建上。
+    status, payload = request("POST", API_BASE + "/prediction", body=body,
+                              headers=auth_headers(), retries=0)
     if status != 200 or not isinstance(payload, dict) or not payload.get("predictionID"):
         die(explain_http_error(status, payload, "创建预测"))
     return payload["predictionID"]
@@ -237,12 +258,20 @@ def download(url, out_dir, stem, index, total):
     ext = os.path.splitext(urllib.parse.urlparse(url).path)[1] or ".png"
     name = "%s%s%s" % (stem, "" if total == 1 else "-%d" % (index + 1), ext)
     dest = os.path.join(out_dir, name)
+    # 图已经出来了、钱也已经花了,这一步再挂掉最冤,所以重试。GET 幂等,重试无副作用。
     req = urllib.request.Request(url, headers={"User-Agent": "gpt_image.py"})
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as f:
-            f.write(resp.read())
-    except urllib.error.URLError as e:
-        die("下载 %s 失败: %s" % (url, e))
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                blob = resp.read()
+            with open(dest, "wb") as f:
+                f.write(blob)
+            break
+        except (urllib.error.URLError, OSError) as e:
+            if attempt == 2:
+                die("下载 %s 失败: %s（已重试 2 次,图还在 CDN 上,可手动取）" % (url, e))
+            log("  下载失败(%s),%ds 后重试 …" % (getattr(e, "reason", e), 5 * (attempt + 1)))
+            time.sleep(5 * (attempt + 1))
     log("  落地 %s (%.0f KB)" % (dest, os.path.getsize(dest) / 1024.0))
     return dest
 

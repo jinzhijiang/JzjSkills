@@ -88,18 +88,21 @@ Flare 与 Sunburst 的**参数完全一样**，只有取舍不同：Flare 快，
 ## 计价（实测）
 
 目录里 `cost` 是 `usage_based` 且 `amount/min/max` 全为 `null`（"Usage-based pricing"），
-**事前问不出单价**，只能事后从预测的 `metrics.cost` 读。实测样本：
+**事前问不出单价**，只能事后读结算值。实测汇总（n=94，2026-09-18 ~ 09-20，以 `low`/1024² 为主）：
 
-| 配置 | 耗时 | 结算成本 |
-|------|------|----------|
-| flare / text-to-image / `quality=low` / 1024x1024 | 7.5s | **$0.00615** |
-| flare / text-to-image / `quality=low` / 1920x1088 | 9.7s | **$0.004515** |
+| | n | 单价 min / 中位 / max | 耗时 min / 中位 / max |
+|---|---|---|---|
+| 文生图 | 34 | $0.00594 / **$0.00664** / $0.00795 | 6.1s / **9.3s** / 15.0s |
+| 编辑 | 60 | $0.01581 / **$0.02837** / $0.06160 | 9.1s / **20.0s** / 27.2s |
 
-注意第二行比第一行**便宜**——计价按 token 走，不跟像素数单调相关，别用分辨率去估价。
-`quality` 才是成本的主要旋钮（`xhigh`/`max` 官方明说更贵）。
+- **分辨率不是成本主因**：1920×1088 实测 $0.004515 / 9.7s，比 1024×1024 的 $0.00615 / 7.5s 还便宜。
+  按 token 结算，不跟像素数单调相关，别用分辨率估价。`quality` 才是主旋钮（`xhigh`/`max` 官方明说更贵）。
+- **编辑约是文生图的 4 倍贵、2 倍慢**，源图要当输入 token 吃进去。能重出就别改。
 
-每次预测跑完，`GET /v1/prediction/{id}` 的 `metrics` 里有 `predict_time` 与 `cost`，
-`gpt_image.py` 会把这两个值打到 stderr。
+读结算值的两个端点**字段名不同**（同一个数字）：单条 `GET /v1/prediction/{id}` 读
+`metrics.cost` / `metrics.predict_time`；列表 `GET /v2/executions?limit=N` 读顶层的
+`execution_cost` / `run_time`——列表里**没有** `metrics`，查一批账要走列表端点。
+`gpt_image.py` 每跑完一次会把单条的两个值打到 stderr。
 
 ---
 
