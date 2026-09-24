@@ -23,12 +23,12 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ## meta.json 字段
 
-`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(待收尾的设备设置列表,如 `[{"type":"android_screen_off_timeout"}]`;没改过任何设置时不写该字段。三种 type(`android_screen_off_timeout` / `android_stayon` / `harmony_timeout`)都只是「改过、release 要收尾」的标记,一律不存原值——release 统一设 1 分钟 / 统一关常亮 / 撤销覆盖。旧锁兼容:`allocator_version` ≤ 2 是单个 dict,≤ 3 的 `android_screen_off_timeout`、≤ 4 的 `android_stayon` 带 `prev`,读取时都兼容、`prev` 一律忽略)。
+`allocator_version`、`device_key`、`platform`(android|ios|harmony)、`kind`(physical|emulator|simulator)、`device_id`(serial/udid/connectkey;AVD 未启动时为 null,boot 后回填)、`name`(AVD 名 / 设备名)、`owner_pid`、`owner_chain`(v6 起:`[{"pid", "start"}]`,默认是祖父 + 父两个进程,显式 `--owner` 时只有它;`start` 为 `LC_ALL=C ps -o lstart=` 的输出,用来识别 pid 复用,取不到为 null。v5 及以前没有这个字段,读取时按 `owner_pid` 单元素链处理)、`project`、`acquired_at`(ISO 带时区)、`ttl_hours`、`created_by_allocator`、`booted_by_allocator`、`memory_mb`(本次启动施加的 guest RAM;未指定 / 不适用为 null,幂等重启会沿用它)、`screen_restore`(待收尾的设备设置列表,如 `[{"type":"android_screen_off_timeout"}]`;没改过任何设置时不写该字段。三种 type(`android_screen_off_timeout` / `android_stayon` / `harmony_timeout`)都只是「改过、release 要收尾」的标记,一律不存原值——release 统一设 1 分钟 / 统一关常亮 / 撤销覆盖。旧锁兼容:`allocator_version` ≤ 2 是单个 dict,≤ 3 的 `android_screen_off_timeout`、≤ 4 的 `android_stayon` 带 `prev`,读取时都兼容、`prev` 一律忽略)。
 
 ## 陈旧(stale)判定
 
-1. `owner_pid` 已死 → 立即陈旧;
-2. `owner_pid` 存活但锁龄 > `ttl_hours`(默认 8h)→ 陈旧(防会话长开泄漏);
+1. `owner_chain` 上的进程全都死了 → 立即陈旧。pid 活着但启动时间与记录不符(被不相干的进程复用)算死;`ps` 取不到启动时间时按活着算——宁可晚回收,不误回收别人正在用的设备;
+2. owner 存活但锁龄 > `ttl_hours`(默认 8h)→ 陈旧(防会话长开泄漏);
 3. meta.json 缺失 / 损坏:目录 mtime 距今 < 60s 视为持有中(并发写宽限),否则陈旧。
 
 每次 acquire 起手先全局清扫全部陈旧锁(不限本次候选设备,并发清扫由 rename 决出唯一赢家);候选竞争时遇到陈旧锁也会就地回收后抢占;`clean` 手动回收。
@@ -43,7 +43,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `--no-create` | 关 | 只复用现有设备,无空闲直接 exit 3 |
 | `--headless` | 关 | 新启动的模拟器不开窗口(Android `-no-window`;iOS 不拉起 Simulator.app) |
 | `--no-probe` 无此开关 | — | 真机在被选中前一律先 `adb shell echo ok`(约 50ms);不答话的跳过并进 `warnings`。`--device` 点名的只告警不拦截 |
-| `--owner <pid>` | 自动取祖父进程 | 锁持有者。**AI 会话里别传**——默认值会走到祖父进程(python → shell → 会话)拿到真正长命的 pid;而 harness 里每条命令常是新起的短命 shell,`$PPID` 可能就是那个转瞬即死的 shell,锁一落库就成 `dead_pid` 陈旧锁、随后被别人正当回收。只有确知某个长命进程 pid 时才显式传 |
+| `--owner <pid>` | 自动取祖父 + 父进程 | 锁持有者。**AI 会话里别传**——默认记下祖父进程(python → shell → 会话,真正长命的那个)与父进程两条,任一存活即持有;而 harness 里每条命令常是新起的短命 shell,`$PPID` 可能就是那个转瞬即死的 shell,锁一落库就成 `dead_pid` 陈旧锁、随后被别人正当回收。**`nohup` 等脱离会话的长脚本里传 `--owner $$`**:那时祖父是拉起脚本就退出的外壳(v5 及以前只记祖父,锁当场陈旧,被别的会话回收并熄屏)。显式传了就只认它 |
 | `--project <path>` | 当前目录 | 记录占用方,亦是幂等重取的匹配键 |
 | `--ttl <小时>` | 8 | 本锁的最大年龄 |
 | `--timeout <秒>` | Android 300 / iOS 180 | 模拟器启动等待上限 |
@@ -104,6 +104,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
   "memory_mb": 1024,
   "created": false, "booted": true, "reused": false,
   "owner_pid": 4242, "project": "/path/to/app",
+  "owner_chain": [{"pid": 4242, "start": "Thu Sep 24 09:12:03 2026"},
+                  {"pid": 5310, "start": "Thu Sep 24 11:40:57 2026"}],
   "lock_dir": "/Users/me/.ai-device-locks/android-avd_Pixel_10",
   "release_cmd": "python3 /abs/path/scripts/device_lock.py release --key android-avd:Pixel_10",
   "usage": {
@@ -157,8 +159,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 构建/安装后或测试中途设备熄屏时重新点亮,不必重新 acquire。目标选择:
 
-- 不带选择参数 → 本会话(owner+project)持有的那台;
-- `--key` → 指定锁;`--all-mine` → 该 owner 持有的全部;
+- 不带选择参数 → 本会话持有的那台(调用方的 owner 链与锁的 `owner_chain` 有交集,且 project 相同);
+- `--key` → 指定锁;`--all-mine` → owner 链有交集的全部;
 - `--device <id>` → 先在锁记录里找,找不到就从当前连着的设备反查平台(adb → hdc → iOS 模拟器),都没有则 exit 3。
 
 改设备设置都要记进锁 meta(release 据此收尾),所以**无锁设备只做一次性唤醒**:`wake --device` 反查出来的设备会跳过放宽超时(静默),与 `--keep-awake` 同用则 exit 2 `ARGS`;先 acquire 再用 `wake --key <key> --keep-awake`。
@@ -167,10 +169,12 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 ## release
 
-`--key <device_key>` / `--device <id或名>` / `--all-mine [--owner <pid>]` 三选一,可加 `--no-lock`。幂等,恒 exit 0。
-输出:`{"ok": …, "action": "release", "released": [...], "tidied": [...], "not_found": [...]}`。
+`--key <device_key>` / `--device <id或名>` / `--all-mine` 三选一,可加 `--owner <pid>`、`--force`、`--no-lock`。幂等,恒 exit 0。
+输出:`{"ok": …, "action": "release", "released": [...], "tidied": [...], "not_found": [...]}`;有被拒的锁时另带 `"refused": [{"device_key", "owner_pid", "project", "acquired_at"}]`。
 
-- **`--device` 指向一台没有锁记录的设备时,仍然做设备侧收尾**,记进 `tidied`。这一条是补一类真实事故:有会话绕过 `acquire` 直接 `adb -s` 装包跑测(或在 release 前崩了),设备停在被测 app 前台、屏幕一直亮,而锁目录干干净净。此前这里只报 `not_found` 然后**什么都不做**,却仍然 `ok: true` —— 一个人在「app 还开着、屏幕不熄」时最先敲的就是这条命令,它报成功却不收尾,是这个脚本里最会骗人的一条路径。收尾三步幂等无副作用(Home 只是退到后台,不关 app),而「没有锁」就等于「没有会话在用」,所以收拾它不碍着谁;设备真被**别的会话**持有时走不到这里(那时 `keys` 非空,按正常还锁处理)。
+- **只还自己的锁**(v6):`--key` / `--device` 指向的锁若仍被**别的会话**持有(`owner_chain` 存活,且与调用方的 owner 链——默认祖父 + 父,传了 `--owner` 就是它——不相交),默认拒绝:不还锁、不碰设备,记进 `refused`,`ok: false`。确认是自己的遗留才加 `--force`。陈旧锁(owner 全死 / 超 TTL)不受限,谁都能清。起因是 2026-09-24 的连锁事故:nohup 脚本的锁被误判陈旧、设备转手给别的会话,脚本跑完照常 `release --key`,v5 会把人家的锁连同屏幕一起收掉。`--all-mine` 同样按 owner 链交集取锁。
+
+- **`--device` 指向一台没有锁记录的设备时,仍然做设备侧收尾**,记进 `tidied`。这一条是补一类真实事故:有会话绕过 `acquire` 直接 `adb -s` 装包跑测(或在 release 前崩了),设备停在被测 app 前台、屏幕一直亮,而锁目录干干净净。此前这里只报 `not_found` 然后**什么都不做**,却仍然 `ok: true` —— 一个人在「app 还开着、屏幕不熄」时最先敲的就是这条命令,它报成功却不收尾,是这个脚本里最会骗人的一条路径。收尾三步幂等无副作用(Home 只是退到后台,不关 app),而「没有锁」就等于「没有会话在用」,所以收拾它不碍着谁;设备真被**别的会话**持有时走不到这里(那时 `keys` 非空,v6 起按上一条拒绝并记进 `refused`)。
 - **`ok` 不再恒为 true**:点名了目标却一件事都没做成(设备没连着、也没有锁)才是 `false`。过去一条什么都没做的 release 和一条真收了尾的 release 输出一模一样。
 
 收尾顺序:**还锁 → 按 Home 退出被测 app → 屏幕设置收尾 → 真机熄屏落锁**(设备侧三步短超时、尽力而为,设备已拔线就跳过;失败不影响还锁)。
@@ -211,7 +215,8 @@ python3 scripts/device_lock.py status --device 13261FDD4004HW
               "state": "running|booted|stopped|shutdown|connected",
               "ram_mb": 2048,
               "lock": null | {"state": "HELD|STALE", "reason": "dead_pid|ttl_expired|…",
-                               "owner_pid": 1, "owner_alive": true, "project": "…",
+                               "owner_pid": 1, "owner_alive": true,
+                               "owner_chain": [{"pid": 1, "start": "…"}], "project": "…",
                                "acquired_at": "…", "age_hours": 0.5,
                                "created_by_allocator": false}}],
  "orphan_locks": [...], "warnings": [...]}
@@ -242,7 +247,7 @@ python3 scripts/device_lock.py status --device 13261FDD4004HW
 
 ## 幂等与并发语义
 
-- 同 `owner`+`project` 重复 acquire → 返回已持有设备,`reused: true`,并刷新 `acquired_at`(续 TTL);若该设备已被手动关掉,会自动重新启动它(RAM 沿用锁里的 `memory_mb`)。鸿蒙设备不会被重启——断连即放弃该锁另行分配。幂等重取同样会再做一次亮屏解锁。
+- owner 链有交集 + 同 `project` 重复 acquire → 返回已持有设备,`reused: true`,并刷新 `acquired_at`(续 TTL);若该设备已被手动关掉,会自动重新启动它(RAM 沿用锁里的 `memory_mb`)。鸿蒙设备不会被重启——断连即放弃该锁另行分配。幂等重取同样会再做一次亮屏解锁。
 - 多会话同刻抢同一候选:`mkdir` 只有一个成功,失败方自动尝试下一候选;双方同时判定某锁陈旧时,rename 先到者才有权删除。
 - 候选启动失败会先回滚锁、关掉本次拉起的模拟器进程,再换下一台;不会遗留"锁着/跑着一台起不来的设备"。
 - 锁着的模拟器被人手动关机:锁仍视为持有(owner 可能重启它),不会被误回收;在 status 里表现为 `state: stopped` 且 `lock` 非空。

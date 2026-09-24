@@ -135,6 +135,37 @@ python3 scripts/device_lock.py status --busy
 **绕过锁的是没走 acquire 的这一边**。锁是协作约定,只对走本 skill 的会话生效
 ——所以「我就用一下、应该没人」这种想法本身就是故障源。
 
+## 测试跑着跑着设备被熄屏 / 被测 app 被强停 / `status` 里自己的设备显示无锁
+
+**你的锁被当成陈旧锁回收了,设备很可能已经转手。** 别的会话每次 `acquire` 起手都会全局清扫陈旧锁,
+回收时对设备做全套收尾(强停占 8081/8082 的 app → Home → 熄屏),然后可能把这台分给它自己去装包。
+锁被判陈旧只有两个来源:owner 进程全死了,或锁龄超过 TTL。前者几乎都是 owner 选错了。
+
+2026-09-24 连撞三轮的现场(用 `nohup zsh -ic "<脚本>" &` 跑 Patrol 截图,脚本里 acquire 没传 `--owner`):
+
+| 轮次 | 看到的 | 实际发生的 |
+|---|---|---|
+| 1、2 | `Total: 0` + 装包 `Failed to install split APK` / `ShellCommandUnresponsiveException`,每轮白等 5 分多钟 | 锁已是 `dead_pid`;推断是别的会话领到同一台、同时装包(改好 owner 后同一台 2.5 分钟一次通过) |
+| 3 | `Total: 1` 但成功、失败都是 0,中途截图全黑 | 已坐实:锁注册表里自己的锁没了,另一会话在那一刻 acquire,回收时强停了被测 app、熄了屏 |
+
+v5 及以前 owner 只记祖父进程,而这种跑法的祖父正是 `nohup zsh -ic` 那层外壳。实测它在 acquire 之后
+几秒内就不在了(脚本本身活着、已过继给 launchd;外壳为什么先走没深究),锁随即成了 `dead_pid`。
+第 1、2 轮还把 Pixel 2 XL 误判成「装包会卡死」,脚本里改成 `--owner $$` 后同一台一次通过。
+
+排查与修法:
+
+```bash
+python3 scripts/device_lock.py status --device <id>
+# lock 为 null,或 project 不是你 → 锁已不在你名下;看 lock.owner_chain / owner_alive 能看出是谁的哪个进程
+```
+
+- v6 起默认 owner 链 = 祖父 + 父(各带启动时间),任一存活即持有,nohup 脚本不传 `--owner` 也不会再中招;
+  脚本里 `acquire --owner $$` 仍是最明确的写法。**别传 `--owner $PPID`**(见 SKILL.md)。
+- 锁被回收之后,原脚本收尾的 `release --key` 在 v5 会把**已经转手给别人**的锁连同屏幕一起收掉;
+  v6 起这种情况会被拒绝,记进 `refused`。看到 `refused` 就说明你的锁早就丢了,不要加 `--force` 硬抢。
+- 顺带一个 shell 坑:`echo "=== EXIT $(basename x) $?"` 里的 `$?` 会被前面的命令替换刷成 0,
+  这一轮明明失败却打印成功。退出码要先 `rc=$?` 存进变量再打印。
+
 ## 手动清理
 
 本 skill 的 release **不关模拟器**(留给下个会话热复用)。需要彻底清理时:
@@ -219,7 +250,8 @@ python3 <skill根>/scripts/device_lock.py acquire --project "$PWD"
 
 - wifi adb(`192.168.x.x:5555`)按真机处理,key 用完整串号。
 - 多个项目同一时刻 acquire:`mkdir` 原子性保证同一设备只有一个会话拿到,输家自动换下一台或新建。
-- AI 忘记 release:owner 进程退出后,任意会话下次 acquire 时自动回收;或手动 `clean`。
+- AI 忘记 release:owner 链上的进程全部退出后,任意会话下次 acquire 时自动回收;或手动 `clean`。
+- 跨会话 `release`:别人正持有的存活锁默认拒绝(`refused`),要 `--force`;陈旧锁不受限。
 - 长时间压测(> 8h)记得传大 `--ttl`,否则锁可能被判陈旧回收。
 - 自定义 `AI_DEVICE_LOCKS_DIR` 时,同机所有会话必须用同一个值,否则互相看不见锁、互斥失效。
 - 锁着的模拟器被人手动关掉:锁不会被误回收;持有者下次幂等 acquire 会自动把它重新启动(此重启不过内存闸门——净占用不增)。

@@ -31,10 +31,11 @@ python3 <skill根>/scripts/device_lock.py acquire --device <id> --project "$PWD"
 
 被别人占着时它以 `EXIT_BUSY` 拒绝,并直接告诉你对方的 `owner_pid` 与 `project`,你当场就能换一台。
 
-### ⚠️ 不要传 `--owner $PPID`
+### ⚠️ 不要传 `--owner $PPID`;nohup 长脚本里传 `--owner $$`
 
-**别传 `--owner`,让脚本自己判定。** 它的 `default_owner_pid()` 会主动走到
-**祖父进程**(python → shell → AI 会话),拿到的是真正长命的那个 pid。
+**直接从会话里调用时别传 `--owner`,让脚本自己判定。** 它会记下一条 owner 链:
+**祖父进程**(python → shell → AI 会话,真正长命的那个)+ **父进程**,各带启动时间;
+链上任一进程还活着(且启动时间对得上,不是被复用的 pid),锁就算持有中。
 
 而 AI harness 里每条命令通常是**新起的短命 shell**,`$PPID` 拿到的可能就是那个
 转瞬即死的 shell。锁一落库 owner 就死了 → 判定 `dead_pid` → 变陈旧 →
@@ -43,7 +44,16 @@ python3 <skill根>/scripts/device_lock.py acquire --device <id> --project "$PWD"
 2026-08-28 真踩到:`acquire --owner $PPID` 领到的锁,owner 43726 当场死亡,
 半小时后设备被另一个项目的会话拿走,期间没有任何报错。
 
-只有你**确知**某个长命进程的 pid 时才显式传 `--owner`。
+**反方向的例外:用 `nohup zsh -ic "<脚本>" &` 这类方式脱离会话跑的长脚本,在脚本里 `acquire --owner $$`。**
+这时祖父进程恰恰是那层 `nohup zsh -ic` 外壳,它把脚本拉起来就退出了。v5 及以前只记祖父,
+锁当场陈旧,别的会话一 acquire 就在起手清扫里回收它,并对设备执行收尾——**强停占 8081 的被测 app、
+按 Home、熄屏**——设备也可能随即被分给别人。2026-09-24 连撞三轮,症状全都像设备坏了:`Total: 0` +
+装包 `ShellCommandUnresponsiveException`(推断是两个会话同时往一台装包)、`Total: 1` 但成功失败都是 0
+(被测 app 被强停)、截图全黑、`status` 里自己正在跑的设备显示无锁。当时一度把 Pixel 2 XL 误判成
+「装包会卡死」,改传 `--owner $$` 后同一台 2.5 分钟一次通过。v6 起默认链里带上了父进程(= 脚本本身),
+不传也不会再出事;`--owner $$` 仍是最明确的写法,老版本也认。
+
+只有你**确知**某个长命进程的 pid 时才显式传 `--owner`;显式传了就只认它,不再附带默认链。
 
 ### ⚠️ 「现在应该没人在用吧」是不可能成立的判断
 
@@ -60,11 +70,12 @@ python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什�
 **先怀疑手机,再怀疑代码。**
 
 失败和「没有结果」是两回事:`Failed: 2` 是测试跑了并给出了判决,值得去读代码;
-而 `Total: 0` 是**一个判决都没拿到**,那多半根本没跑起来。后者常见的三种原因里,
+而 `Total: 0` 是**一个判决都没拿到**,那多半根本没跑起来。后者常见的几种原因里,
 只有一种跟你的改动有关:
 
 | 现象 | 是什么 | 怎么办 |
 |---|---|---|
+| `Total: 0` + 装包超时(`ShellCommandUnresponsiveException`),而 `status --device <id>` 里这台**已不在你名下** | **锁被回收、别的会话正同时往这台装包** | 修 owner(见「不要传 `--owner $PPID`」),重新 acquire;别去怪设备 |
 | `Total: 0` + 装包超时(`ShellCommandUnresponsiveException`)/ `INSTRUMENTATION_ABORTED: System has crashed` | **设备正在掉线** | `adb devices` + `adb -s <id> shell echo ok`;换一台 |
 | 跑之前就报 TLS / `HandshakeException` / 拉不到依赖 | 网络或工具链 | 重试 |
 | `Total: N` 且 `Failed: M` | 真的测试失败 | 才轮到读代码 |
@@ -236,8 +247,9 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 
 - **内存闸门(启动模拟器数量随宿主内存自适应)**:后两个 tier(启动已停止 / 新建)执行前做双重检查——并发配额 `clamp((总内存-8GB)/每台开销, 1..4)`(默认每台按 4GB 估算,16GB 机 → 最多 2 台,含 iOS Booted;卡死 offline 的模拟器进程也计入)+ 可用内存下限。可用内存有 **6GB 硬下限:低于 6GB 一律不启动/新建模拟器,第一台也拦**(`MEMORY_PRESSURE`,exit 9);其上再看动态估算(可用 ≥ 每台开销 + 2GB),动态估算在 0 台模拟器运行时只告警不拦截——那一层防的是并发互踩。macOS 可用内存按内核 memorystatus 水位(`sysctl kern.memorystatus_level`,把压缩器与文件缓存的可回收量算在内)估算,vm_stat 口径兜底。不过闸则跳过这两个 tier,真机与已运行模拟器不受影响;全部无路可走时报 `MEMORY_PRESSURE`(exit 9)。`--device` 显式指定时只告警不拦截(含硬下限);幂等重取重启自己已持有的模拟器不拦截;探测失败自动放行。覆盖手段:`--max-emulators <N>` / 环境变量 `AI_DEVICE_MAX_EMULATORS`、`--mem-override` / `AI_DEVICE_MEM_OVERRIDE=1`(整体跳过,含硬下限)。
 - **单台内存(`--memory <MB>`,仅 Android)**:传了就走 `emulator -memory`,新建的 AVD 同时写进 `config.ini` 的 `hw.ramSize`(启动已有 AVD 只覆盖本次,不动它的配置)。每台开销随之改为 `guest RAM + 1.5GB`,所以压小内存能换配额:16GB 机上默认 2 台,`--memory 1024` → 3 台。低于 2048MB 会告警(API 31+ 镜像的 lowmemorykiller 可能杀掉被测 app);RAM 与 AVD 配置不一致会作废 quickboot 快照,那次是冷启动。iOS 模拟器不是 VM,simctl 没有等价旋钮,只能靠限台数。
-- 上锁 = 原子创建 `~/.ai-device-locks/<key>/`,内含 meta.json(owner_pid、project、时间、TTL)。
-- 陈旧回收:owner 进程已死 → 立即可回收;存活但锁龄超 TTL(默认 8h)→ 可回收。每次 acquire 起手会**全局清扫**所有陈旧锁(不限本次要用的设备),死锁不会在注册表里躺尸。长时间压测传大 `--ttl`。
+- 上锁 = 原子创建 `~/.ai-device-locks/<key>/`,内含 meta.json(owner_pid 与 owner_chain、project、时间、TTL)。
+- 陈旧回收:owner 链上的进程全都死了(或 pid 已被复用、启动时间对不上)→ 立即可回收;存活但锁龄超 TTL(默认 8h)→ 可回收。
+- **release 只还自己的锁**(v6):`--key` / `--device` 指向的锁仍被别的会话持有(owner 链存活且与调用方不相交)时拒绝,记进 `refused`、`ok: false`;确认是自己的遗留才加 `--force`。防的是连锁事故:锁被误判陈旧回收、设备已转手,原脚本收尾那条 `release --key` 把别人的锁连同屏幕一起收掉。陈旧锁仍然谁都能清。每次 acquire 起手会**全局清扫**所有陈旧锁(不限本次要用的设备),死锁不会在注册表里躺尸。长时间压测传大 `--ttl`。
 - **release 只还锁,模拟器保持运行**,给下个会话热复用;彻底关机 / 删除 `ai-test-*` 模拟器的手动命令见 [references/troubleshooting.md](references/troubleshooting.md)。
 
 ## Patrol 两个特有的注意点
@@ -277,7 +289,9 @@ Home 不杀进程。`acquire` 交付前与 `release` 收尾时脚本都会 force
 | exit 7 `BUSY` | `--device` 指定的设备被别的会话占用;去掉 `--device` 另挑,或 `status` 看占用者 |
 | exit 9 `MEMORY_PRESSURE` | 宿主可用内存低于 6GB 硬下限(第一台也拦),或已有模拟器在跑、内存不够再开一台。优先领真机;或关闭闲置模拟器(`adb -s <id> emu kill`)、退出大进程释放内存后重试;Android 可 `--memory 1024` 压小单台换配额(硬下限不受影响);确认有余量可 `--mem-override` 或调 `--max-emulators` |
 | `Total: 0` 且日志里有 `BindException: Address already in use` | **别的项目遗留的 app 进程占着 Patrol 的 8081/8082**,与设备锁无关(锁里可能显示空闲)。`adb -s <id> shell "netstat -lnt \| grep -E ':808[12]'"` 看有没有 LISTEN;`acquire`/`release` 现在会自动 force-stop,手工则 `am force-stop <占用包>`。详见上面的症状小节 |
-| 一整轮跑完 `Total: 0`(不是 `Failed: N`)/ 装包 `ShellCommandUnresponsiveException` / `INSTRUMENTATION_ABORTED` | **真机正在掉线,不是代码问题**。`adb devices` + `adb -s <id> shell echo ok` 一秒钟摘干净;确认后 `release` 再 `acquire` 换一台。acquire 的探测挡得住「不答话」,挡不住「答得上话但装包要几百秒」 |
+| 自己正在跑的设备 `status` 显示无锁 / 测试中途被熄屏、被测 app 被强停 / `Total: 1` 但成功失败都是 0 | **你的锁被当成陈旧锁回收了**:owner 进程已死(nohup 长脚本没传 `--owner $$` 且脚本是 v5 及以前,或传了 `--owner $PPID`),别的会话 acquire 起手清扫时回收并收尾,还可能正往这台装它自己的包。见上文「不要传 `--owner $PPID`」一节 |
+| `release` 返回 `ok: false` + `refused` | 那把锁正被别的会话持有,默认不替人家还锁。多半是你的锁早被回收、设备已转手;确认确实是自己的遗留才 `--force` |
+| 一整轮跑完 `Total: 0`(不是 `Failed: N`)/ 装包 `ShellCommandUnresponsiveException` / `INSTRUMENTATION_ABORTED` | 先排除上上一行(锁被回收、两个会话同时往一台装包:`status --device <id>` 看锁还在不在自己名下)。锁没问题才是**真机正在掉线,不是代码问题**。`adb devices` + `adb -s <id> shell echo ok` 一秒钟摘干净;确认后 `release` 再 `acquire` 换一台。acquire 的探测挡得住「不答话」,挡不住「答得上话但装包要几百秒」 |
 | 模拟器画面停帧 / adb 挂死 / `Lost connection to device` | 多为宿主内存超卖把 QEMU 拖进 swap(渲染管线冻结)。杀掉对应 qemu 进程冷启动,减少并发模拟器数;内存闸门就是为预防它 |
 | adb 里设备 unauthorized / offline | 不参与分配;真机上确认 USB 调试授权弹窗 |
 | 截图全黑 / 点击没反应 / driver 找不到 widget | 真机持锁期间自动锁屏已放宽到 10 分钟;更长的构建后跑 `wake --key $DEVICE_KEY` 再点亮;`screen.locked=true` 说明设了 PIN,需人工解一次 |

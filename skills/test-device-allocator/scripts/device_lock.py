@@ -27,7 +27,9 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-ALLOCATOR_VERSION = 5          # 5: android_stayon 收尾也不再回写原值,统一关掉常亮;
+ALLOCATOR_VERSION = 6          # 6: meta 增 owner_chain(祖父+父 pid 连同启动时间),链上任一存活即持有;
+                               #    release 不再释放别的会话的存活锁(--force 才覆盖);
+                               #    5: android_stayon 收尾也不再回写原值,统一关掉常亮;
                                #    4: release 收尾改为 Home→统一 1 分钟→熄屏(不再回写原值,
                                #    screen_restore 里 android_screen_off_timeout 不再需要 prev;
                                #    3: screen_restore 由单个 dict 改为 dict 列表。读取均向下兼容)
@@ -141,14 +143,83 @@ def pid_alive(pid):
         return False
 
 
-def default_owner_pid():
-    """默认锁持有者:脚本祖父进程(python → shell → AI 会话进程)。"""
+def proc_start(pid):
+    """进程启动时间(`ps -o lstart`,强制 C locale 保证跨会话可比);取不到返回 None。
+
+    用来识别 pid 复用:链上记下的进程死后,pid 被不相干的进程拿去,启动时间就对不上。
+    """
+    if not isinstance(pid, int) or pid <= 1:
+        return None
+    rc, out, _ = run(["env", "LC_ALL=C", "ps", "-o", "lstart=", "-p", str(pid)], timeout=5)
+    s = " ".join(out.split())
+    return s if rc == 0 and s else None
+
+
+def default_owner_chain():
+    """默认 owner 链:[祖父, 父],各带启动时间;链上任一进程活着,锁就算持有中。
+
+    只记祖父在 nohup 长脚本里会出事(2026-09-24 实测):`nohup zsh -ic "<脚本>" &`
+    时祖父是那层 `zsh -ic` 外壳,它把脚本拉起来就退出,锁当场被判 dead_pid,
+    别的会话 acquire 起手清扫时回收它——强停被测 app、按 Home、熄屏,设备也可能
+    随即被分给别人,正在跑的测试随之挂掉。把父进程(= 脚本本身)也记上,脚本活着锁就活着;
+    直接从会话调用时父进程是本条命令的短命 shell,判定照旧落在会话进程上。
+    """
     ppid = os.getppid()
     rc, out, _ = run(["ps", "-o", "ppid=", "-p", str(ppid)], timeout=5)
     gp = out.strip()
+    pids = []
     if rc == 0 and gp.isdigit() and int(gp) > 1:
-        return int(gp)
-    return ppid if ppid > 1 else os.getpid()
+        pids.append(int(gp))
+    if ppid > 1 and ppid not in pids:
+        pids.append(ppid)
+    if not pids:
+        pids.append(os.getpid())
+    return [{"pid": p, "start": proc_start(p)} for p in pids]
+
+
+def owner_chain_for(explicit_owner=None):
+    """显式 --owner 只认它本身(尊重调用方的意图);否则取默认链。"""
+    if explicit_owner:
+        return [{"pid": explicit_owner, "start": proc_start(explicit_owner)}]
+    return default_owner_chain()
+
+
+def meta_chain(meta):
+    """锁的 owner 链;v5 及更早的旧锁只有 owner_pid,当作不带启动时间的单元素链。"""
+    chain = (meta or {}).get("owner_chain")
+    if isinstance(chain, list):
+        chain = [e for e in chain if isinstance(e, dict) and isinstance(e.get("pid"), int)]
+        if chain:
+            return chain
+    pid = (meta or {}).get("owner_pid")
+    return [{"pid": pid, "start": None}] if isinstance(pid, int) else []
+
+
+def _chain_entry_alive(entry):
+    if not pid_alive(entry.get("pid")):
+        return False
+    want = entry.get("start")
+    if not want:
+        return True
+    now = proc_start(entry.get("pid"))
+    # ps 失败取不到时宁可当活着:误判死亡会回收别人正在用的设备
+    return now is None or now == want
+
+
+def owner_alive(meta):
+    return any(_chain_entry_alive(e) for e in meta_chain(meta))
+
+
+def chains_intersect(a, b):
+    """两条链是否指向同一进程:pid 相同,且双方都有启动时间时必须一致(防 pid 复用)。"""
+    for x in a:
+        for y in b:
+            if x.get("pid") != y.get("pid"):
+                continue
+            sx, sy = x.get("start"), y.get("start")
+            if not sx or not sy or sx == sy:
+                return True
+    return False
 
 
 def sdk_root():
@@ -558,7 +629,7 @@ def eval_lock(path, meta, ttl_override=None):
         except OSError:
             return "FREE", None
         return ("HELD", "meta_pending") if age < META_GRACE_SECONDS else ("STALE", "corrupt_meta")
-    if not pid_alive(meta.get("owner_pid")):
+    if not owner_alive(meta):
         return "STALE", "dead_pid"
     ttl = ttl_override if ttl_override is not None else meta.get("ttl_hours", DEFAULT_TTL_HOURS)
     age_h = lock_age_hours(meta, path)
@@ -626,11 +697,11 @@ def list_locks():
     return out
 
 
-def find_my_lock(owner, project):
+def find_my_lock(chain, project):
     for _, meta, path in list_locks():
         if not meta:
             continue
-        if meta.get("owner_pid") == owner and meta.get("project") == project:
+        if meta.get("project") == project and chains_intersect(chain, meta_chain(meta)):
             state, _ = eval_lock(path, meta)
             if state == "HELD":
                 return meta
@@ -1686,16 +1757,18 @@ def build_result(c, owner, project, created, booted, reused):
             "memory_mb": c.get("memory_mb"),
             "created": created, "booted": booted, "reused": reused,
             "owner_pid": owner, "project": project,
+            "owner_chain": (read_lock(c["key"]) or {}).get("owner_chain"),
             "lock_dir": lock_dir(c["key"]),
             "release_cmd": f"python3 {script_path()} release --key {c['key']}",
             "usage": usage}
 
 
-def make_meta(c, owner, project, ttl, created=False, booted=False):
+def make_meta(c, owner, project, ttl, created=False, booted=False, chain=None):
     return {"allocator_version": ALLOCATOR_VERSION,
             "device_key": c["key"], "platform": c["platform"], "kind": c["kind"],
             "device_id": c["device_id"], "name": c["name"],
-            "owner_pid": owner, "project": project,
+            "owner_pid": owner, "owner_chain": chain or [{"pid": owner, "start": proc_start(owner)}],
+            "project": project,
             "acquired_at": now_iso(), "ttl_hours": ttl,
             "created_by_allocator": created, "booted_by_allocator": booted,
             "memory_mb": c.get("memory_mb")}
@@ -1832,7 +1905,8 @@ def resolve_acquire_platforms(args, warnings):
 
 
 def cmd_acquire(args):
-    owner = args.owner or default_owner_pid()
+    chain = owner_chain_for(args.owner)
+    owner = chain[0]["pid"]
     project = os.path.abspath(args.project or os.getcwd())
     warnings = []
     sweep_stale_locks()
@@ -1842,7 +1916,7 @@ def cmd_acquire(args):
         warnings.append("--memory 仅对 Android 模拟器生效,iOS 模拟器不是 VM,本次忽略")
 
     # 幂等重取:同 owner + project 的存活锁直接复用,不多占设备
-    mine = find_my_lock(owner, project)
+    mine = find_my_lock(chain, project)
     if mine and (not args.device or args.device in (mine.get("device_id"), mine.get("name"))):
         log(f"已持有 {mine['device_key']},幂等复用")
         try:
@@ -1893,7 +1967,7 @@ def cmd_acquire(args):
             mem_warned = True
         # 只有真要启动它时才谈内存;复用已在跑的模拟器改不了它的 RAM
         c["memory_mb"] = emu_memory_for(c, args.memory) if c["needs_boot"] else None
-        meta = make_meta(c, owner, project, args.ttl)
+        meta = make_meta(c, owner, project, args.ttl, chain=chain)
         if not acquire_lock_with_reclaim(c["key"], meta):
             if explicit:
                 held = read_lock(c["key"]) or {}
@@ -1967,7 +2041,7 @@ def cmd_acquire(args):
                 last_env_fail = f"simctl create 失败: {err}"
                 continue
             c = cand(4, "ios", "simulator", f"ios-sim:{udid}", name, udid, True)
-            try_lock(c["key"], make_meta(c, owner, project, args.ttl, created=True))
+            try_lock(c["key"], make_meta(c, owner, project, args.ttl, created=True, chain=chain))
             try:
                 boot_sim(udid, args.headless, timeout_for(args, "ios"))
             except BootFailure as e:
@@ -1995,7 +2069,7 @@ def cmd_acquire(args):
                      hint="若提示许可证未接受: yes | sdkmanager --licenses")
             c = cand(4, "android", "emulator", f"android-avd:{name}", name, None, True)
             c["memory_mb"] = args.memory
-            try_lock(c["key"], make_meta(c, owner, project, args.ttl, created=True))
+            try_lock(c["key"], make_meta(c, owner, project, args.ttl, created=True, chain=chain))
             try:
                 c["device_id"] = boot_avd(name, args.headless, timeout_for(args, "android"),
                                           c["memory_mb"])
@@ -2045,11 +2119,26 @@ def tidy_unlocked_device(device_id, lock_screen_after, warnings):
     return meta
 
 
+def held_by_other(key, caller_chain):
+    """这把锁还被别的会话持有(存活且链不相交)时返回它的 meta,否则 None。
+
+    防的是 2026-09-24 的连锁事故:脚本的锁被误判陈旧回收,设备转手给别的会话;
+    脚本跑完照常 `release --key`,就会把别人的锁连同屏幕一起收掉。陈旧锁谁都能清。
+    """
+    d = lock_dir(key)
+    meta = read_meta(d)
+    state, _ = eval_lock(d, meta)
+    if state == "HELD" and meta and not chains_intersect(caller_chain, meta_chain(meta)):
+        return meta
+    return None
+
+
 def cmd_release(args):
-    released, not_found, tidied = [], [], []
+    released, not_found, tidied, refused = [], [], [], []
     warnings = []
     keys = []
     orphan_targets = []
+    caller = owner_chain_for(args.owner)
     if args.key:
         keys = [args.key]
     elif args.device:
@@ -2059,10 +2148,17 @@ def cmd_release(args):
         if not keys:
             orphan_targets.append(args.device)
     else:  # --all-mine
-        owner = args.owner or default_owner_pid()
         keys = [m.get("device_key") for _, m, _ in list_locks()
-                if m and m.get("owner_pid") == owner]
+                if m and chains_intersect(caller, meta_chain(m))]
     for k in keys:
+        other = None if (args.force or not k) else held_by_other(k, caller)
+        if other:
+            refused.append({"device_key": k, "owner_pid": other.get("owner_pid"),
+                            "project": other.get("project"),
+                            "acquired_at": other.get("acquired_at")})
+            log(f"拒绝释放 {k}:它正被别的会话持有(owner_pid={other.get('owner_pid')}, "
+                f"project={other.get('project')})。确认要抢过来就加 --force")
+            continue
         if k and release_lock(k, lock_screen_after=not args.no_lock):
             released.append(k)
         else:
@@ -2079,12 +2175,14 @@ def cmd_release(args):
     out = {
         # 只有「点名了目标却一件事都没做成」才算失败。过去这里恒为 True,于是
         # 一条什么都没做的 release 和一条真的收了尾的 release 长得一模一样。
-        "ok": bool(released or tidied) or not not_found,
+        "ok": bool(released or tidied) or not (not_found or refused),
         "action": "release",
         "released": released,
         "tidied": tidied,
         "not_found": not_found,
     }
+    if refused:
+        out["refused"] = refused
     if warnings:
         out["warnings"] = warnings
     emit(out)
@@ -2131,12 +2229,13 @@ def cmd_wake(args):
                      hint="用 status 看设备与锁全景")
             targets.append(guessed)
     else:   # 默认:本会话(owner+project)持有的设备;--all-mine 则按 owner 全取
-        owner = args.owner or default_owner_pid()
+        caller = owner_chain_for(args.owner)
         project = os.path.abspath(args.project or os.getcwd())
         if args.all_mine:
-            targets = [m for _, m, _ in list_locks() if m and m.get("owner_pid") == owner]
+            targets = [m for _, m, _ in list_locks()
+                       if m and chains_intersect(caller, meta_chain(m))]
         else:
-            mine = find_my_lock(owner, project)
+            mine = find_my_lock(caller, project)
             if mine:
                 targets.append(mine)
         if not targets:
@@ -2181,7 +2280,8 @@ def cmd_status(args):
         if meta:
             age = lock_age_hours(meta, d)
             view.update({"owner_pid": meta.get("owner_pid"),
-                         "owner_alive": pid_alive(meta.get("owner_pid")),
+                         "owner_alive": owner_alive(meta),
+                         "owner_chain": meta_chain(meta),
                          "project": meta.get("project"),
                          "acquired_at": meta.get("acquired_at"),
                          "age_hours": None if age is None else round(age, 2),
@@ -2325,7 +2425,9 @@ def main():
     a.add_argument("--no-physical", action="store_true", help="排除真机")
     a.add_argument("--no-create", action="store_true", help="只复用现有设备,不新建")
     a.add_argument("--headless", action="store_true", help="新启动的模拟器不显示窗口")
-    a.add_argument("--owner", type=int, help="锁持有者 pid(默认取会话进程,建议传 $PPID)")
+    a.add_argument("--owner", type=int,
+                   help="锁持有者 pid(默认自动记下会话进程与本次调用的父进程,别传 $PPID;"
+                        "nohup 等后台长脚本里传 $$ 最明确)")
     a.add_argument("--project", help="占用方项目路径(默认当前目录)")
     a.add_argument("--ttl", type=float, default=DEFAULT_TTL_HOURS,
                    help="锁最大年龄(小时,默认 8)")
@@ -2380,7 +2482,12 @@ def main():
     g.add_argument("--key", help="acquire 返回的 device_key")
     g.add_argument("--device", help="按 device id / 名称释放")
     g.add_argument("--all-mine", action="store_true", help="释放本会话持有的全部锁")
-    r.add_argument("--owner", type=int, help="配合 --all-mine(默认取会话进程)")
+    r.add_argument("--owner", type=int,
+                   help="以此 pid 的身份释放(默认取会话进程与父进程);配合 --all-mine,"
+                        "也用于判断 --key/--device 指向的锁是不是自己的")
+    r.add_argument("--force", action="store_true",
+                   help="连别的会话正持有的存活锁也释放(默认拒绝并记进 refused,"
+                        "防止锁被回收转手后把别人的锁连同屏幕一起收掉)")
     r.add_argument("--no-lock", action="store_true",
                    help="释放后不按 Home、不熄屏落锁(默认会先 Home 退出被测 app 再熄屏;"
                         "想留在当前界面继续看时用)")
