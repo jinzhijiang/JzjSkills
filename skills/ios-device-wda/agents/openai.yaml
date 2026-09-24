@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS Device WDA"
+  short_description: "用 WebDriverAgent 让 AI 截图、点击、用文字触发 Siri 操作 iOS 真机"
+  default_prompt: "Use $ios-device-wda to acquire the device lock, start or attach WebDriverAgent on the connected iPhone/iPad, drive the UI with point coordinates read from fresh screenshots, hand the launch command to the user if the background launch is blocked, and stop/release when done."
