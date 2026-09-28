@@ -2,8 +2,8 @@
 """校验 commit message 是否符合 git-cz 契约。
 
 只用 python3 标准库,不需要 node / npm —— Flutter、Java、HarmonyOS 等非 Node 项目
-也能用同一套规则把关。配置读的是 git-cz 自己的 changelog.config.*,
-和交互式 `git cz` 共用一份事实来源。
+也能用同一套规则把关。提交走普通 git(`git commit -F <消息文件>`),不调用 git-cz;
+配置沿用 git-cz 的 changelog.config.* 格式与查找规则,是校验规则的唯一来源。
 
 用法:
     check_commit_msg.py [--file <路径> | --message <文本> | -]  # 默认从 .git/COMMIT_EDITMSG 读
@@ -452,7 +452,7 @@ def _validate_header(header: str, config: dict, report: Report) -> None:
     if type_name not in types:
         report.error(f"未知类型 `{type_name}`;可用类型:{', '.join(type_list)}")
     elif type_name not in type_list:
-        report.error(f"类型 `{type_name}` 未列入 config.list,交互式选不到它;可用类型:{', '.join(type_list)}")
+        report.error(f"类型 `{type_name}` 未列入 config.list;可用类型:{', '.join(type_list)}")
 
     # --- emoji
     expected = types.get(type_name, {}).get("emoji", "?")
@@ -493,7 +493,7 @@ def _validate_header(header: str, config: dict, report: Report) -> None:
     if len(stripped) > max_len:
         report.error(f"主题超长:{len(stripped)} 字符 > {max_len}(maxMessageLength {config.get('maxMessageLength')} - 3)")
     if stripped.endswith((".", "。", "!", "！", "?", "？")):
-        report.error("主题结尾不要加标点(git-cz 会自动去掉英文句点)")
+        report.error("主题结尾不要加标点")
     if re.match(r"^[a-z]+(\([^()]*\))?\s*[:：]", stripped):
         report.error("主题里重复写了 type 前缀")
     if config.get("requireChineseSubject") and stripped and not CJK_RE.search(stripped):
@@ -566,7 +566,7 @@ def render(report: Report, header: str, strict: bool, use_json: bool) -> int:
         print(f"✖  {error}", file=sys.stderr)
 
     if failed:
-        print("\n提交信息不符合 git-cz 契约,已拒绝。改好后重试,或运行 `npx git-cz` 交互式生成。", file=sys.stderr)
+        print("\n提交信息不符合 git-cz 契约,已拒绝。改好消息文件后重试 `git commit -F <文件>`。", file=sys.stderr)
         return 1
     if report.warnings:
         print("✔  提交信息通过(有警告)", file=sys.stderr)

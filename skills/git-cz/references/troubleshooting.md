@@ -22,30 +22,26 @@ python3 <skill根>/scripts/check_commit_msg.py show-config --repo <仓库>   # �
 解析器只认纯字面量。两条路:装 node,或把配置改写成等价的 `.git-cz.json`。
 这种情况下校验会**跳过**而不是用默认值硬判,不会误伤合法提交。
 
-**交互式里选不到某个类型**
+**报「类型 `x` 未列入 config.list」**
 
-该类型没写进 `list`。`types` 定义了但不在 `list` 里 = 定义了个选不到的类型。
+该类型在 `types` 里有定义,却没写进 `list`。`list` 就是允许使用的类型清单,补进去即可。
 
-**交互式不问 scope**
+**报「未知 scope」**
 
-`scopes: []`。git-cz 的 scope 只能从列表里选,不支持自由输入,空列表时这一问被整个跳过。
-要 scope 就在项目的配置里列出可选值。
+该仓库的配置里列了 `scopes`,只能从中选:改用列表里的值,或在该仓库的配置里补上。
+全局模板是 `scopes: []`,表示不限制、可以自由写模块名。
 
 ## 提交类
 
-**`No files staged!` 然后什么也没发生**
+**`git commit -F` 报 `nothing to commit` / `no changes added to commit`**
 
-git-cz 只提交暂存区内容,先 `git add`。注意它此时**退出码仍是 0**,
-脚本要靠 `git rev-parse HEAD` 前后比对来判断是否真的提交了。
+暂存区是空的,先 `git add <文件>`。脚本里要确认真的提交了,就比对提交前后的
+`git rev-parse HEAD`,或看 `git log -1`。
 
-**`Cannot read property 'emoji' of undefined`**
+**中文正文一行太长**
 
-`--type=` 传了 `types` 里不存在的类型。非交互模式不校验类型名。
-
-**中文正文没有自动折行**
-
-git-cz 用 `word-wrap` 按空格折行,中文没空格所以折不动。手动断行,每行 ≤ 72 列
-(中文一个字 2 列,约 36 个汉字)。
+git 不会替你折行。手动断行,每行 ≤ 72 列(中文一个字 2 列,约 36 个汉字);
+超了 `check_commit_msg.py` 会告警,`--strict` 下直接拒绝。
 
 **emoji 在终端里显示成方块或错位**
 
@@ -104,5 +100,5 @@ python3 <skill根>/scripts/check_commit_msg.py --file "$1"
 
 **多个 AI 会话同时提交同一个仓库**
 
-git-cz 把消息写在 `<git-dir>/COMMIT_EDITMSG`,并发会互相覆盖。同一仓库串行提交,
-或走 `git commit -F <自己的临时文件>` 这条路径。
+同一仓库串行提交。消息文件一次一个(`mktemp`),别共用 `/tmp/commitmsg` 这类固定路径——
+并发会话会互相覆盖,提交出去的是别人的消息。

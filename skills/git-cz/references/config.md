@@ -3,6 +3,10 @@
 以下均按 git-cz **4.9.0** 的实际源码(`lib/defaults.js`、`lib/getConfig.js`、
 `lib/formatCommitMessage.js`、`lib/questions/*`)整理,不是从文档推测的。
 
+本 skill 已不调用 git-cz 的命令,提交走普通 git。这份配置现在只由 `check_commit_msg.py` 读取——
+它照 git-cz 的源码实现了同样的查找顺序、合并方式与拼装算法,所以下文仍按 git-cz 描述;
+标了「仅交互式」的键对校验没有作用。
+
 ## 配置查找顺序
 
 `getConfig(root)` 里的 `root` 是 **`git rev-parse --show-toplevel` 的结果**,
@@ -33,13 +37,13 @@
 |---|---|---|
 | `disableEmoji` | 未设置(等价 false) | true 时标题不带 emoji,且 `breakingChangePrefix` / `closedIssuePrefix` 一并不输出 |
 | `format` | `'{type}{scope}: {emoji}{subject}'` | 标题模板,占位符仅这 4 个 |
-| `list` | `['test','feat','fix','chore','docs','refactor','style','ci','perf']` | 交互式选择器里出现的类型**与顺序**;不在此列表的类型选不到 |
+| `list` | `['test','feat','fix','chore','docs','refactor','style','ci','perf']` | 允许使用的类型;不在此列表的类型校验报错(交互式里也是选择器的内容与顺序) |
 | `types` | 10 个内置类型 | 类型 → `{description, emoji, value}` |
-| `scopes` | `[]` | 可选 scope 列表;**只能选、不能自由输入** |
-| `questions` | `['type','scope','subject','body','breaking','issues','lerna']` | 要问哪几问、按什么顺序问 |
-| `messages` | 无 | 按问题名覆盖提问文案,如 `{type: '选择类型:'}` |
-| `maxMessageLength` | `64` | 主题输入框上限,**实际生效值是它减 3** |
-| `minMessageLength` | `3` | 主题下限,少于它无法提交 |
+| `scopes` | `[]` | 非空时 scope 只能从中选;为空不限制(git-cz 交互式里 scope 只能选不能输入,空列表时整问跳过) |
+| `questions` | `['type','scope','subject','body','breaking','issues','lerna']` | 仅交互式:要问哪几问、按什么顺序问 |
+| `messages` | 无 | 仅交互式:按问题名覆盖提问文案,如 `{type: '选择类型:'}` |
+| `maxMessageLength` | `64` | 主题上限,**实际生效值是它减 3**(给 emoji + 空格预留) |
+| `minMessageLength` | `3` | 主题下限 |
 | `breakingChangePrefix` | `'🧨 '` | 接在 `BREAKING CHANGE: ` 之后 |
 | `closedIssueMessage` | `'Closes: '` | 关闭 issue 的文案 |
 | `closedIssuePrefix` | `'✅ '` | 接在 `closedIssueMessage` 之前 |
@@ -96,8 +100,8 @@ maxLength: config.maxMessageLength - 3,
 - 限制的是**主题字段本身**,不含 type、scope、冒号;所以 `maxMessageLength: 64` ⇒ 主题 ≤ 61 字符。
 - 按 JS 字符数(UTF-16 码元)计,不是终端列宽。61 个汉字 = 61 字符 = **122 列**,
   远超 git 惯例的 72 列。这是 git-cz 管不了的部分,由 `check_commit_msg.py` 按显示列宽补一道警告。
-- 主题的 `filter` 会自动 trim 并**剥掉结尾的英文句点**(循环剥,`a...` → `a`);
-  中文句号「。」不在此列,得自己不写。
+- git-cz 交互式的主题 `filter` 会自动 trim 并剥掉结尾的英文句点;普通 git 不会,
+  所以 `check_commit_msg.py` 对任何结尾标点(`.` `。` `!` `?` 及全角)直接报错,写的时候就别带。
 
 ## 逐项说明:模板相对原配置改了什么
 
@@ -105,13 +109,11 @@ maxLength: config.maxMessageLength - 3,
 
 | 改动 | 原因 |
 |---|---|
-| `list` 补上 `release`,并按使用频率重排 | `types` 里定义了 `release` 却没进 `list`,交互式**永远选不到**它。`list` 的顺序就是选择器的显示顺序 |
-| 新增 `messages` | 原生提问文案是英文,与中文提交信息割裂。键名与 `questions` 一一对应 |
+| `list` 补上 `release`,并按使用频率重排 | `types` 里定义了 `release` 却没进 `list`,就是个用不了的类型(校验报「未列入 config.list」) |
+| 去掉 `questions` 与 `messages`(2026-09-29) | 两者只给 git-cz 交互式提问用;本 skill 改走普通 git 后不再调用 git-cz,校验脚本也不读它们 |
 | 显式写出 `breakingChangePrefix` / `closedIssueMessage` / `closedIssuePrefix` | 原来靠默认值,页脚长什么样得去翻源码;写出来配置文件才自解释 |
 | `test` 描述从「添加测试」改为「添加或修改测试」 | 改测试也走 `test`,原描述会让人误以为只有新增才算 |
-| `scopes` 保持 `[]` 并加注释 | git-cz 的 scope 只能选不能输入,`scopes: []` 时这一问被**整个跳过**。全局模板列不出对所有项目都成立的 scope,交给项目级配置 |
-| `questions` 保留 `'scope'` | 与 `scopes: []` 并不冲突——空列表时自动跳过,项目级配置补上 `scopes` 就自动生效,不用再改 `questions` |
-| 保留 `questions` 中已去掉的 `'lerna'` | 默认值里有 `lerna`,非 lerna monorepo 用不到,去掉是对的 |
+| `scopes` 保持 `[]` 并加注释 | 空 = 不限制,可以自由写模块名。全局模板列不出对所有项目都成立的 scope;哪个项目要约束,在自己仓库的配置里列出可选值 |
 | 新增 `requireChineseSubject: true` | 提交信息要中文写。git-cz 没有这个能力,由 `check_commit_msg.py` 补上 |
 | 大量注释 | 上面这些坑都写在旁边,免得下次重新踩 |
 
