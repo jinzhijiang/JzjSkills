@@ -9,6 +9,8 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 - 每把锁一个目录:`<根>/<sanitized-key>/meta.json`。目录名由 device_key 中非 `[A-Za-z0-9._-]` 的字符替换为 `_` 得到(如 `android-avd:Pixel_10` → `android-avd_Pixel_10`)。
 - 上锁 = `mkdir` 原子创建目录(多进程同刻抢同一设备只有一个成功)。
 - 解锁 / 回收 = 先原子 `rename` 为 `<dir>.reclaim-<pid>-<ts>` 墓碑再删除(rename-then-delete,并发回收只有一个赢家);超过 10 分钟的墓碑残骸会被顺手清理。
+- v7 起 Android 锁目录里另有两个文件,随锁目录一起删:`dialog_guard.json`(`{"pid", "start", "started_at"}`,无关系统弹窗 guard 子进程)、
+  `system_dialogs.jsonl`(弹窗处理记录,一行一条)。**不写进 meta.json**:guard 与会话会并发读改写,写 meta 会互相覆盖。
 
 ## device_key 规则
 
@@ -53,6 +55,7 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 | `--no-wake` | 关 | 不做亮屏解锁,也不改自动锁屏时长(默认会唤醒并尝试解锁分配到的设备) |
 | `--screen-timeout <分钟>` | 10 | 持锁期间**真机**的自动锁屏时长;改动记进锁 meta,release 收尾统一设回 1 分钟(不回写原值)。`0` = 完全不碰设备设置(release 也不碰,但仍会 Home + 熄屏)。模拟器恒不改 |
 | `--keep-awake` | 关 | 长时间无人值守测试时,显式在持锁期间临时常亮(比放宽超时更进一步:完全不熄屏);release 收尾统一关掉常亮(写 `stay_on_while_plugged_in=0`,不回写原值) |
+| `--keep-system-dialogs` | 关 | 不处理与被测功能无关的系统弹窗(仅 Android,见下文「无关系统弹窗」);默认交付前扫一次并拉起 guard |
 
 分配优先级(tier 间严格有序,tier 内先按 `--platform` 所列平台顺序、再按各平台的确定性排序):
 
@@ -153,9 +156,44 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 - 超时类不存原值。Android:release 统一设 1 分钟,不回写原值(测试机的省电收尾常态)。鸿蒙:`OverrideTimeout` 是系统托管的瞬态覆盖(设备一进 SLEEP,系统自己会挂一个 10000ms 的 override),回写它会让醒着的设备 10 秒就熄屏;release 恒用 `power-shell timeout -r` 交还系统设置(鸿蒙没有可写的持久时长旋钮)。
 - `--no-wake` 完全不碰设备;`--screen-timeout 0` 只唤醒解锁、不改超时。旧版 `--no-keep-awake` 仍可接受。
 
+### 无关系统弹窗(v7,仅 Android;acquire 亮屏之后自动执行)
+
+交付前按白名单扫一次前台窗口,再确保持锁期间有一个 guard 子进程。结果放进 `system_dialogs`(非 Android 平台不带该字段):
+
+```json
+"system_dialogs": {
+  "handled": [{"at": "2026-09-28T22:46:52+08:00", "trigger": "acquire", "dialog": "USB 用途选择(USB 用于)",
+               "window": "com.android.settings/com.android.settings.Settings$UsbDetailsActivity",
+               "action": "返回键", "closed": true}],
+  "guard": {"pid": 77027, "reused": false}
+}
+```
+
+- `handled` 每条一个前台弹窗:`trigger` 为 `acquire` / `wake` / `guard`;`action` 是 `返回键` 或 `点「…」`,找不到要点的按钮时为 null;
+  `closed` 是动手后焦点是否离开了那个窗口。没动手时带 `skipped`:`instrumentation_running`(设备上有进程还活着的
+  instrumentation = 测试进行中)或 `focus_changed`(两次读焦点之间框已经没了)。一次最多连收 3 个(先 USB 用途、再 Play 保护)。
+- `guard`:`reused: true` 表示锁上已有存活的 guard(幂等重取、重复 wake);拉不起来为 null(只做了交付前那一扫)。
+- 传 `--keep-system-dialogs` 时为 `{"attempted": false, "reason": "disabled_by_--keep-system-dialogs"}`。
+- 白名单(`SYSTEM_DIALOG_RULES`)按焦点窗口的 `包名/…Activity` 认:`com.android.settings/…UsbDetailsActivity` → 返回键;
+  `com.android.vending/…PlayProtectDialogsActivity` → `uiautomator dump` 找「不发送」/「Don't send」点中心。
+  运行时权限框(permissioncontroller、`com.lbe.security.miui`)刻意不在其中。
+- 全程 fail-soft:任何异常只写 stderr,不影响 acquire。
+
+## guard(内部)
+
+`python3 device_lock.py guard --key <device_key>` —— 由 acquire / wake 以脱离会话的方式拉起(stdin/stdout/stderr 全接 `/dev/null`,
+POSIX 上 `start_new_session`),不必手调。
+
+- 起手等拉起方把自己的 pid 写进 `dialog_guard.json`(最多 5 秒),等不到就退出。
+- 起一条 `adb -s <id> logcat -b events -v brief -T 1 wm_set_resumed_activity:I am_set_resumed_activity:I *:S`,只听 Activity 恢复事件;
+  行里带白名单的 Activity 名时停 0.5 秒(恢复事件先于拿到焦点)再走一遍与 acquire 相同的处理,记录追加进 `system_dialogs.jsonl`。
+  **不轮询 dumpsys**:那要拿 WMS 全局锁,测帧类用例里会多出卡顿。logcat 流断了(设备掉线)隔 5 秒重起。
+- 每 5 秒确认一次:锁目录还在、`dialog_guard.json` 里还是自己的 pid、锁仍是 `HELD`(owner 链存活且未超 TTL);任一不满足就收掉
+  logcat 子进程退出。所以 release / 陈旧锁回收 / `clean` 之后它最多 5 秒自行消失;收到 SIGTERM 也会先收掉子进程。
+
 ## wake
 
-`python3 device_lock.py wake [--key <k> | --device <id> | --all-mine] [--owner <pid>] [--project <path>] [--screen-timeout <分钟>] [--keep-awake]`
+`python3 device_lock.py wake [--key <k> | --device <id> | --all-mine] [--owner <pid>] [--project <path>] [--screen-timeout <分钟>] [--keep-awake] [--keep-system-dialogs]`
 
 构建/安装后或测试中途设备熄屏时重新点亮,不必重新 acquire。目标选择:
 
@@ -165,7 +203,9 @@ stdout 恒为**单行 JSON**(机读);所有过程日志走 stderr。仅 python3 
 
 改设备设置都要记进锁 meta(release 据此收尾),所以**无锁设备只做一次性唤醒**:`wake --device` 反查出来的设备会跳过放宽超时(静默),与 `--keep-awake` 同用则 exit 2 `ARGS`;先 acquire 再用 `wake --key <key> --keep-awake`。
 
-输出:`{"ok": true, "action": "wake", "results": [{"device_key", "platform", "device_id", "name", "screen": {…}}]}`。`screen` 结构同 acquire。
+输出:`{"ok": true, "action": "wake", "results": [{"device_key", "platform", "device_id", "name", "screen": {…}, "system_dialogs": {…}}]}`。
+`screen` 结构同 acquire;`system_dialogs` 只有 Android 才带,结构同 acquire(`trigger` 为 `wake`)。已持锁的设备顺带补起 guard
+(v7 之前领的锁没有 guard,一条 `wake --key` 就补上);无锁设备只扫一次、不起 guard。
 
 ## release
 
@@ -218,9 +258,14 @@ python3 scripts/device_lock.py status --device 13261FDD4004HW
                                "owner_pid": 1, "owner_alive": true,
                                "owner_chain": [{"pid": 1, "start": "…"}], "project": "…",
                                "acquired_at": "…", "age_hours": 0.5,
-                               "created_by_allocator": false}}],
+                               "created_by_allocator": false,
+                               "dialog_guard": {"pid": 77027, "alive": true, "started_at": "…"},
+                               "system_dialogs": [{…同 acquire 的 handled 条目…}]}}],
  "orphan_locks": [...], "warnings": [...]}
 ```
+
+`dialog_guard` / `system_dialogs` 只在锁目录里有对应文件时出现(v7 起的 Android 锁);`system_dialogs` 是最近 10 条处理记录,
+含 guard 在持锁期间做的。`alive: false` 表示 guard 已不在(被 kill、机器重启),`wake --key` 会补起一个。
 
 装了 hdc 时,`status` 也会枚举鸿蒙目标(真机 `state: connected`,模拟器 `state: running` 并计入 `memory.running_vms`)。
 `orphan_locks` 是锁着但设备已消失(如 AVD 被删)的锁;unauthorized / offline / 未 Connected 的设备在 `warnings` 里。

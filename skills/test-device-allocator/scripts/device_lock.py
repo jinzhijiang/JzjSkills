@@ -8,6 +8,7 @@
   python3 device_lock.py wake [--key <k> | --device <id> | --all-mine]
   python3 device_lock.py status
   python3 device_lock.py clean [--all]
+  python3 device_lock.py guard --key <device_key>   # 内部:acquire / wake 自动拉起,不必手调
 
 stdout 只输出单行 JSON(机读);人读过程信息全部走 stderr。
 锁注册表:~/.ai-device-locks(环境变量 AI_DEVICE_LOCKS_DIR 可覆盖)。
@@ -19,15 +20,21 @@ import glob
 import json
 import os
 import platform as platform_mod
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
-ALLOCATOR_VERSION = 6          # 6: meta 增 owner_chain(祖父+父 pid 连同启动时间),链上任一存活即持有;
+ALLOCATOR_VERSION = 7          # 7: Android 无关系统弹窗:acquire / wake 交付前按白名单关掉,持锁期间
+                               #    guard 子进程盯着;锁目录增 dialog_guard.json、system_dialogs.jsonl;
+                               # 6: meta 增 owner_chain(祖父+父 pid 连同启动时间),链上任一存活即持有;
                                #    release 不再释放别的会话的存活锁(--force 才覆盖);
                                #    5: android_stayon 收尾也不再回写原值,统一关掉常亮;
                                #    4: release 收尾改为 Home→统一 1 分钟→熄屏(不再回写原值,
@@ -111,11 +118,16 @@ def fail(code, error, message, hint=None):
     sys.exit(code)
 
 
-def run(cmd, timeout=CMD_TIMEOUT, input_text=None):
-    """subprocess 包装:不抛异常,返回 (rc, stdout, stderr)。"""
+def run(cmd, timeout=CMD_TIMEOUT, input_text=None, encoding=None):
+    """subprocess 包装:不抛异常,返回 (rc, stdout, stderr)。
+
+    encoding 缺省随系统 locale;输出里有中文(如 uiautomator dump)时传 "utf-8",
+    否则 LC_ALL=C 的环境里解码失败,整条输出会丢成空串。
+    """
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, input=input_text)
+                           timeout=timeout, input=input_text, encoding=encoding,
+                           errors="replace" if encoding else None)
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError:
         return 127, "", f"command not found: {cmd[0]}"
@@ -563,11 +575,15 @@ def lock_dir(key):
     return os.path.join(lock_root(), sanitize(key))
 
 
-def write_meta(dirpath, meta):
-    tmp = os.path.join(dirpath, "meta.json.tmp")
+def write_json(path, obj):
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, os.path.join(dirpath, "meta.json"))
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def write_meta(dirpath, meta):
+    write_json(os.path.join(dirpath, "meta.json"), meta)
 
 
 def try_lock(key, meta):
@@ -1468,6 +1484,260 @@ def lock_screen(meta):
     return None
 
 
+# ---------- 无关系统弹窗(仅 Android) ----------
+#
+# 与被测功能无关、却会卡住测试的系统弹窗,按白名单自动处理:acquire / wake 交付前扫一次,
+# 持锁期间由后台 guard 子进程盯着(cmd_guard)。四条边界保证不影响测试,改这里之前先读:
+#
+# 1. 只认白名单里的窗口。被测 app 自己触发的运行时权限框(permissioncontroller,MIUI 上是
+#    com.lbe.security.miui)不在其中:用例要断言它弹没弹、点的是允许还是拒绝,替它点掉会让
+#    「不该弹却弹了」的回归静默通过。
+# 2. 设备上有 instrumentation 真在跑(= 测试进行中)就不动手:uiautomator dump 要另连一次
+#    UiAutomation,返回键 / 点击也可能落进被测 app。已知的两种都出现在测试起跑之前
+#    (插线时、装测试包时),不受这条影响。
+# 3. 动手前再读一次焦点,那个框还在最前面才按键 / 点击。
+# 4. 只选一次性、不改设置、不外发数据的选项。
+#
+# 加规则的量法:框在前台时 `dumpsys window | grep mCurrentFocus` 读出包名与 Activity;先试返回键
+# 能不能关(能就用 back,不依赖系统语言),不能再在没有测试在跑时 `uiautomator dump` 抄按钮上的字。
+
+SYSTEM_DIALOG_RULES = (
+    # MIUI 插上 USB 弹的用途选择(仅限充电 / 传输文件 / 传输照片)。可取消:返回键 = 「取消」,
+    # USB 模式维持原样,adb 不受影响。2026-09-28 M2104K10AC / MIUI 14 实测。
+    {"name": "USB 用途选择(USB 用于)",
+     "package": "com.android.settings", "activity": "UsbDetailsActivity", "action": "back"},
+    # Play 保护装未知应用时问「要发送应用以进行安全检查吗?」,装包一直卡着等人点。不可取消
+    # (返回键无效),Compose 画的、没有 resource-id,只能按字点。选「不发送」:「发现未知应用时
+    # 一律发送」改持久设置,「本次发送」把测试包传给 Google。2026-09-28 Pixel 2 XL / Android 11
+    # 实测:点完装包照常 Success。
+    {"name": "Play 保护:要发送应用以进行安全检查吗",
+     "package": "com.android.vending", "activity": "PlayProtectDialogsActivity",
+     "action": "tap", "texts": ("不发送", "Don't send")},
+)
+GUARD_POLL_SECONDS = 5       # guard 多久确认一次锁还在(也是 release 后它自己退出的最长延迟)
+DIALOG_RECORDS_KEEP = 10     # status 展示最近几条处理记录
+
+
+def android_focus(adb, serial):
+    """拿着输入焦点的窗口:`包名/Activity 全名`(或 NotificationShade 这类系统窗口名);读不到返回 ""。"""
+    m = re.search(r"mCurrentFocus=Window\{\S+ \S+ ([^}\s]+)\}",
+                  _android_dump(adb, serial, "window", "mCurrentFocus"))
+    return m.group(1) if m else ""
+
+
+def match_system_dialog(window):
+    for rule in SYSTEM_DIALOG_RULES:
+        if window.startswith(rule["package"] + "/") and rule["activity"] in window:
+            return rule
+    return None
+
+
+def android_instrumenting(adb, serial):
+    """设备上是否有 instrumentation 真在跑(Patrol / Espresso / Appium 的 UiAutomator2 都是)。
+
+    只认进程还活着的:测试被宿主那头硬掐掉时,AMS 里会留下 mFinished=false、进程早没了的
+    僵尸记录(2026-09-28 Pixel 2 XL 实测,包都卸了记录还在),只数条目会把这台永远判成「在跑」。
+    读不到按「在跑」算:宁可这次不动手,也别在测试中途点屏。
+    """
+    rc, out, _ = run([adb, "-s", serial, "shell",
+                      "dumpsys activity processes | sed -n '/Active instrumentation:/,/^$/p'"],
+                     timeout=WAKE_CMD_TIMEOUT)
+    if rc != 0:
+        return True
+    pids = re.findall(r"ProcessRecord\{[0-9a-f]+ (\d+):", out or "")
+    if not pids:
+        return "ActiveInstrumentation" in (out or "")    # 有记录却抠不出进程号:保守
+    probe = "; ".join(f"[ -d /proc/{p} ] && echo {p}" for p in pids) + "; true"
+    rc, out, _ = run([adb, "-s", serial, "shell", probe], timeout=WAKE_CMD_TIMEOUT)
+    return rc != 0 or bool((out or "").split())
+
+
+def android_tap_text(adb, serial, package, texts):
+    """dump 当前窗口,按 texts 的先后找第一个有的字、点它的中心;返回点到的字,找不到返回 None。
+
+    uiautomator dump 要另连一次 UiAutomation,只能在没有 instrumentation 时调(调用方负责)。
+    MIUI 上 dump 会往 stderr 打一段 theme_compatibility.xml 的异常,无害。
+    """
+    remote = "/data/local/tmp/device_lock_dialog.xml"
+    xml = ""
+    for _ in range(3):                  # 窗口动画中偶尔吐空,重试
+        _, out, _ = run([adb, "-s", serial, "shell",
+                         f"uiautomator dump {remote} >/dev/null 2>&1; cat {remote}; rm -f {remote}"],
+                        timeout=WAKE_CMD_TIMEOUT, encoding="utf-8")
+        i = (out or "").find("<?xml")
+        if i >= 0:
+            xml = out[i:]
+            break
+        time.sleep(1)
+    try:
+        nodes = list(ET.fromstring(xml).iter("node")) if xml else []
+    except ET.ParseError:
+        return None
+    for want in texts:
+        for n in nodes:
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.get("bounds") or "")
+            if n.get("text") != want or n.get("package") != package or not m:
+                continue
+            x1, y1, x2, y2 = map(int, m.groups())
+            rc, _, _ = run([adb, "-s", serial, "shell", "input", "tap",
+                            str((x1 + x2) // 2), str((y1 + y2) // 2)], timeout=WAKE_CMD_TIMEOUT)
+            return want if rc == 0 else None
+    return None
+
+
+def dismiss_system_dialogs(adb, serial, trigger):
+    """按白名单处理一次前台的无关系统弹窗;返回处理记录,没有弹窗时为空列表。"""
+    records = []
+    for _ in range(3):                  # 可能叠着两个(先 USB 用途、再 Play 保护),一次收完
+        window = android_focus(adb, serial)
+        rule = match_system_dialog(window)
+        if not rule:
+            break
+        rec = {"at": now_iso(), "trigger": trigger, "dialog": rule["name"], "window": window}
+        records.append(rec)
+        if android_instrumenting(adb, serial):
+            rec["skipped"] = "instrumentation_running"
+            break
+        if android_focus(adb, serial) != window:     # 两次读之间框没了:按键会落到别人身上
+            rec["skipped"] = "focus_changed"
+            continue
+        if rule["action"] == "back":
+            rc, _, _ = run([adb, "-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"],
+                           timeout=WAKE_CMD_TIMEOUT)
+            rec["action"] = "返回键" if rc == 0 else None
+        else:
+            hit = android_tap_text(adb, serial, rule["package"], rule["texts"])
+            rec["action"] = f"点「{hit}」" if hit else None
+        time.sleep(1)
+        rec["closed"] = android_focus(adb, serial) != window
+        if not rec["closed"]:
+            break
+    return records
+
+
+def describe_dialog_record(r):
+    if r.get("skipped") == "instrumentation_running":
+        return f"「{r['dialog']}」在前台,但有测试在跑,没动它"
+    if r.get("skipped") == "focus_changed":
+        return f"「{r['dialog']}」动手前已不在前台,没动它"
+    how = r.get("action") or "没找到要点的按钮"
+    return f"「{r['dialog']}」→ {how},{'已关掉' if r.get('closed') else '仍在前台'}"
+
+
+def dialog_records_path(key):
+    return os.path.join(lock_dir(key), "system_dialogs.jsonl")
+
+
+def append_dialog_records(key, records):
+    """处理记录追加进锁目录的 jsonl。不写 meta.json:guard 与会话并发读改写它会互相覆盖。"""
+    if not key or not records or not os.path.isdir(lock_dir(key)):
+        return
+    try:
+        with open(dialog_records_path(key), "a", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def read_dialog_records(key):
+    try:
+        with open(dialog_records_path(key), encoding="utf-8") as f:
+            lines = f.readlines()[-DIALOG_RECORDS_KEEP:]
+        return [json.loads(x) for x in lines if x.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def guard_path(key):
+    return os.path.join(lock_dir(key), "dialog_guard.json")
+
+
+def read_guard(key):
+    try:
+        with open(guard_path(key), encoding="utf-8") as f:
+            g = json.load(f)
+        return g if isinstance(g, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def guard_alive(g):
+    if not isinstance(g, dict) or not pid_alive(g.get("pid")):
+        return False
+    want, now = g.get("start"), proc_start(g.get("pid"))
+    return not want or now is None or now == want
+
+
+def ensure_dialog_guard(key):
+    """持锁期间的弹窗守护:还活着就复用,没有就拉起;返回 {"pid", "reused"},没拉起返回 None。"""
+    if not key or not os.path.isdir(lock_dir(key)):
+        return None
+    g = read_guard(key)
+    if guard_alive(g):
+        return {"pid": g["pid"], "reused": True}
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+          "stderr": subprocess.DEVNULL, "close_fds": True}
+    if os.name == "nt":
+        kw["creationflags"] = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        # 脱离调用方的会话与输出管道:acquire 那条命令返回时不用等它,会话收尾也不会连带杀掉它
+        kw["start_new_session"] = True
+    try:
+        p = subprocess.Popen([sys.executable, script_path(), "guard", "--key", key], **kw)
+    except OSError as e:
+        log(f"系统弹窗守护起不来({e}):本次只做了交付前那一扫")
+        return None
+    try:
+        write_json(guard_path(key), {"pid": p.pid, "start": proc_start(p.pid),
+                                     "started_at": now_iso()})
+    except OSError:
+        pass                            # 没写成的话 guard 等不到自己的名字,会自己退出
+    return {"pid": p.pid, "reused": False}
+
+
+def prepare_system_dialogs(device_id, key, trigger, disabled):
+    """acquire / wake 共用(仅 Android):交付前扫一次 + 确保持锁期间有 guard。尽力而为,绝不抛。"""
+    if disabled:
+        return {"attempted": False, "reason": "disabled_by_--keep-system-dialogs"}
+    handled = []
+    adb = tool("adb")
+    if adb and device_id:
+        try:
+            handled = dismiss_system_dialogs(adb, device_id, trigger)
+        except Exception as e:  # noqa: BLE001
+            log(f"系统弹窗: 处理出错({e}),跳过")
+    for r in handled:
+        log(f"系统弹窗: {describe_dialog_record(r)}")
+    append_dialog_records(key, handled)
+    try:
+        guard = ensure_dialog_guard(key)
+    except Exception:  # noqa: BLE001
+        guard = None
+    return {"handled": handled, "guard": guard}
+
+
+def _resume_event_stream(adb, serial, sink):
+    """起一条只含 Activity 恢复事件的 `logcat -b events` 流,逐行塞进 sink;起不来返回 None。
+
+    `-T 1` 从最近一条接着读,不回放整个缓冲区。事件名 Android 10+ 是 wm_…,更早是 am_…。
+    """
+    try:
+        p = subprocess.Popen([adb, "-s", serial, "logcat", "-b", "events", "-v", "brief", "-T", "1",
+                              "wm_set_resumed_activity:I", "am_set_resumed_activity:I", "*:S"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+    def pump():
+        for raw in iter(p.stdout.readline, b""):
+            sink.put(raw.decode("utf-8", "replace"))
+
+    threading.Thread(target=pump, daemon=True).start()
+    return p
+
+
 # ---------- 候选组装 ----------
 
 def cand(tier, platform_, kind, key, name, device_id, needs_boot):
@@ -1860,7 +2130,7 @@ def resolve_screen_off_ms(args):
 
 
 def finish_acquire(c, owner, project, created, booted, reused, args, warnings):
-    """收尾:清占用的 Patrol 端口 + 亮屏解锁 + 放宽真机自动锁屏 → 输出结果 JSON。
+    """收尾:清占用的 Patrol 端口 + 亮屏解锁 + 放宽真机自动锁屏 + 无关系统弹窗 → 输出结果 JSON。
 
     **交付前先清端口**,而不是只指望上一个会话 release 时清干净:会话崩在半路、
     被 Ctrl-C 掐掉、或者压根绕过本 skill 直接 `patrol test` 的情况都真实存在,
@@ -1881,6 +2151,9 @@ def finish_acquire(c, owner, project, created, booted, reused, args, warnings):
         record_screen_restore(c["key"], screen)
     result = build_result(c, owner, project, created, booted, reused)
     result["screen"] = screen
+    if c["platform"] == "android":      # 亮屏之后再扫:熄屏时焦点在锁屏上,看不见弹窗
+        result["system_dialogs"] = prepare_system_dialogs(
+            c.get("device_id"), c["key"], "acquire", args.keep_system_dialogs)
     flush_warnings(warnings)
     emit(result)
 
@@ -2255,9 +2528,13 @@ def cmd_wake(args):
         screen = safe_wake(m.get("platform"), m.get("kind"), m.get("device_id"),
                            args.keep_awake, ms)
         record_screen_restore(m.get("device_key"), screen)
-        results.append({"device_key": m.get("device_key"), "platform": m.get("platform"),
-                        "device_id": m.get("device_id"), "name": m.get("name"),
-                        "screen": screen})
+        entry = {"device_key": m.get("device_key"), "platform": m.get("platform"),
+                 "device_id": m.get("device_id"), "name": m.get("name"), "screen": screen}
+        if m.get("platform") == "android":
+            # 无锁设备只扫一次、不起 guard(ensure_dialog_guard 见不到锁目录就不拉)
+            entry["system_dialogs"] = prepare_system_dialogs(
+                m.get("device_id"), m.get("device_key"), "wake", args.keep_system_dialogs)
+        results.append(entry)
     flush_warnings(warnings)
     emit({"ok": True, "action": "wake", "results": results})
 
@@ -2286,6 +2563,13 @@ def cmd_status(args):
                          "acquired_at": meta.get("acquired_at"),
                          "age_hours": None if age is None else round(age, 2),
                          "created_by_allocator": meta.get("created_by_allocator", False)})
+        guard = read_guard(key)
+        if guard:
+            view["dialog_guard"] = {"pid": guard.get("pid"), "alive": guard_alive(guard),
+                                    "started_at": guard.get("started_at")}
+        handled = read_dialog_records(key)
+        if handled:
+            view["system_dialogs"] = handled
         return view
 
     def add(key, platform_, kind, device_id, name, dstate, ram_mb=None):
@@ -2409,6 +2693,69 @@ def cmd_clean(args):
     emit({"ok": True, "action": "clean", "removed": removed, "kept": kept})
 
 
+def cmd_guard(args):
+    """(内部)持锁期间盯着无关系统弹窗;由 acquire / wake 经 ensure_dialog_guard 拉起。
+
+    被动听 Activity 恢复事件,白名单里的窗口一恢复就走一遍 dismiss_system_dialogs。
+    不轮询 dumpsys:那要拿 WMS 的全局锁,每隔几秒来一次,测帧类用例里会多出卡顿。
+    锁没了 / 陈旧了 / guard 文件换成了别的 pid(被新 guard 顶替)就收掉 logcat 子进程退出。
+    """
+    key, me = args.key, os.getpid()
+    for _ in range(20):                 # 等拉起方把 guard 文件写好
+        g = read_guard(key)
+        if g and g.get("pid") == me:
+            break
+        time.sleep(0.25)
+    else:
+        return
+    dev = (read_lock(key) or {}).get("device_id")
+    adb = tool("adb")
+    if not dev or not adb:
+        return
+
+    def still_mine():
+        g = read_guard(key)
+        if not g or g.get("pid") != me:
+            return False
+        d = lock_dir(key)
+        return eval_lock(d, read_meta(d))[0] == "HELD"
+
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))     # 被 kill 也走 finally 收掉 logcat
+    events = queue.Queue()
+    stream, started, checked = None, 0.0, time.time()
+    try:
+        while True:
+            if time.time() - checked >= GUARD_POLL_SECONDS:
+                if not still_mine():
+                    return
+                checked = time.time()
+            if stream is None or stream.poll() is not None:
+                if time.time() - started < GUARD_POLL_SECONDS:   # 刚起就断(设备掉线):别空转
+                    time.sleep(GUARD_POLL_SECONDS)
+                    continue
+                dev = (read_lock(key) or {}).get("device_id") or dev   # 模拟器重启后串号会变
+                stream, started = _resume_event_stream(adb, dev, events), time.time()
+                continue
+            try:
+                line = events.get(timeout=GUARD_POLL_SECONDS)
+            except queue.Empty:
+                continue
+            if not any(r["activity"] in line for r in SYSTEM_DIALOG_RULES):
+                continue
+            time.sleep(0.5)             # 恢复事件先于拿到焦点
+            try:
+                append_dialog_records(key, dismiss_system_dialogs(adb, dev, "guard"))
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        if stream is not None and stream.poll() is None:
+            stream.terminate()
+            try:
+                stream.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                stream.kill()
+
+
 def main():
     global _ACTION
     ap = argparse.ArgumentParser(
@@ -2457,6 +2804,10 @@ def main():
     ak.add_argument("--no-keep-awake", dest="keep_awake", action="store_false",
                     help=argparse.SUPPRESS)  # v1 兼容:新默认已是不常亮
     a.set_defaults(keep_awake=False)
+    a.add_argument("--keep-system-dialogs", action="store_true",
+                   help="不处理与被测功能无关的系统弹窗(仅 Android;默认交付前按白名单关掉"
+                        "「USB 用于」「Play 保护:要发送应用以进行安全检查吗」,持锁期间 guard 子进程"
+                        "继续盯着;被测 app 自己的运行时权限框从不碰)")
 
     w = sub.add_parser("wake", help="把设备重新亮屏解锁(测试中途熄屏时用)")
     wg = w.add_mutually_exclusive_group()
@@ -2476,6 +2827,8 @@ def main():
     wk.add_argument("--no-keep-awake", dest="keep_awake", action="store_false",
                     help=argparse.SUPPRESS)  # v1 兼容
     w.set_defaults(keep_awake=False)
+    w.add_argument("--keep-system-dialogs", action="store_true",
+                   help="不处理无关系统弹窗(默认顺带扫一次,已持锁的设备还会补起 guard)")
 
     r = sub.add_parser("release", help="释放锁(幂等,恒 exit 0)")
     g = r.add_mutually_exclusive_group(required=True)
@@ -2500,11 +2853,14 @@ def main():
     c.add_argument("--all", action="store_true", help="清除全部锁(慎用)")
     c.add_argument("--ttl", type=float, help="按此 TTL(小时)重新判定陈旧")
 
+    gd = sub.add_parser("guard", help="(内部)持锁期间盯着无关系统弹窗;acquire / wake 自动拉起")
+    gd.add_argument("--key", required=True, help="要守的锁的 device_key")
+
     args = ap.parse_args()
     _ACTION = args.cmd
     try:
         {"acquire": cmd_acquire, "release": cmd_release, "wake": cmd_wake,
-         "status": cmd_status, "clean": cmd_clean}[args.cmd](args)
+         "status": cmd_status, "clean": cmd_clean, "guard": cmd_guard}[args.cmd](args)
     except SystemExit:
         raise
     except KeyboardInterrupt:

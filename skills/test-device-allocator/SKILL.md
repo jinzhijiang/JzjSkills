@@ -1,6 +1,6 @@
 ---
 name: test-device-allocator
-description: 在这台机器上碰任何 Android、iOS 或 HarmonyOS 真机/模拟器之前先领锁，避免和别的 AI 会话抢同一台设备。**只要你接下来要跑 `adb -s`、`adb install`、`adb shell input`/`screencap`、`hdc -t`、`flutter run/drive/install`、或用模拟器 MCP 点屏截图，第一条命令就必须是 `device_lock.py acquire`，而不是那条 adb**。已经用 `adb devices` 拿到了设备 id、不需要帮你挑设备时同样要走：`acquire --device <id>` 的作用是确认没人占着，被占会直接报出对方的 owner_pid 与 project。不确定要不要领？`status --device <id>` 一行就能看出来，几乎零成本。别用「现在应该没人用吧」来跳过——**别的会话在不在跑，你在自己的会话里是看不见的**。也用于排查这些症状：点击落到别的 app 上、应用反复被切到前台、截图拍到的是另一个 app、设备被占用、模拟器互相污染或卡死、内存不足、屏幕黑屏点不动、测试中途频繁锁屏、测完一直亮屏不锁屏。测完当前这步、后面没有紧接着要用设备的步骤就立刻 release。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器、用户手动调试自行选设备。
+description: 在这台机器上碰任何 Android、iOS 或 HarmonyOS 真机/模拟器之前先领锁，避免和别的 AI 会话抢同一台设备。**只要你接下来要跑 `adb -s`、`adb install`、`adb shell input`/`screencap`、`hdc -t`、`flutter run/drive/install`、或用模拟器 MCP 点屏截图，第一条命令就必须是 `device_lock.py acquire`，而不是那条 adb**。已经用 `adb devices` 拿到了设备 id、不需要帮你挑设备时同样要走：`acquire --device <id>` 的作用是确认没人占着，被占会直接报出对方的 owner_pid 与 project。不确定要不要领？`status --device <id>` 一行就能看出来，几乎零成本。别用「现在应该没人用吧」来跳过——**别的会话在不在跑，你在自己的会话里是看不见的**。也用于排查这些症状：点击落到别的 app 上、应用反复被切到前台、截图拍到的是另一个 app、设备被占用、模拟器互相污染或卡死、内存不足、屏幕黑屏点不动、测试中途频繁锁屏、测完一直亮屏不锁屏、与被测功能无关的系统弹窗挡路（MIUI「USB 用于」、Play 保护「要发送应用以进行安全检查吗」卡住装包，v7 起自动关掉）。测完当前这步、后面没有紧接着要用设备的步骤就立刻 release。不用于无需设备的单元或 Widget 测试、启动鸿蒙模拟器、用户手动调试自行选设备。
 ---
 
 # 并发测试设备分配(device_lock)
@@ -77,6 +77,7 @@ python3 <skill根>/scripts/device_lock.py status --busy          # 谁占着什�
 |---|---|---|
 | `Total: 0` + 装包超时(`ShellCommandUnresponsiveException`),而 `status --device <id>` 里这台**已不在你名下** | **锁被回收、别的会话正同时往这台装包** | 修 owner(见「不要传 `--owner $PPID`」),重新 acquire;别去怪设备 |
 | `Total: 0` + 装包超时(`ShellCommandUnresponsiveException`)/ `INSTRUMENTATION_ABORTED: System has crashed` | **设备正在掉线** | `adb devices` + `adb -s <id> shell echo ok`;换一台 |
+| `Total: 0`,装包那几秒 logcat 里有 `Crash of app androidx.test.orchestrator running instrumentation`(`installPackageLI` 强停的) | **设备上挂着一条早就在跑的 instrumentation**(别的会话或之前被硬掐掉的测试留下的),装包时被系统强停,本轮跟着拿不到结果 | 直接重跑一次(2026-09-28 Pixel 2 XL 重跑即通过);`dumpsys activity processes` 的 `Active instrumentation` 一节看得到它 |
 | 跑之前就报 TLS / `HandshakeException` / 拉不到依赖 | 网络或工具链 | 重试 |
 | `Total: N` 且 `Failed: M` | 真的测试失败 | 才轮到读代码 |
 
@@ -181,11 +182,12 @@ adb -s <id> shell "netstat -lnt | grep -E ':808[12]'"   # 有 LISTEN 就是它
 
 | 子命令 | 用途 | 常用参数 |
 |---|---|---|
-| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮 |
-| `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用) | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake` |
+| `acquire` | 领取并锁定一台空闲设备,stdout 输出单行 JSON | `--platform android\|ios\|harmony\|any\|逗号组合`(默认 android)、`--device <id>` 指定设备、`--no-physical` 排除真机、`--no-create` 只复用不新建、`--headless`、`--project <路径>`、`--ttl <小时>`、`--timeout <秒>`、`--max-emulators <N>` 并发模拟器上限、`--memory <MB>` 单台 guest RAM(仅 Android)、`--mem-override` 跳过内存闸门、`--no-wake` 不亮屏解锁、`--screen-timeout <分钟>` 真机自动锁屏时长(默认 10,0=不改)、`--keep-awake` 显式临时常亮、`--keep-system-dialogs` 不处理无关系统弹窗 |
+| `wake` | 把设备重新亮屏解锁(构建/安装后或测试中途熄屏时用),顺带扫一次无关系统弹窗 | 不带参数=本会话持有的设备;或 `--key` / `--device` / `--all-mine`;`--screen-timeout <分钟>`;长时间无人值守才传 `--keep-awake`;`--keep-system-dialogs` |
 | `release` | 释放锁(幂等,恒 exit 0);真机收尾:**force-stop 占着 Patrol 端口(8081/8082)的 app** → Home 退出被测 app → 自动锁屏统一设为 1 分钟 → 熄屏落锁。**`--device` 指向没有锁记录的设备时照样收尾**(记进 `tidied`),用来收拾绕过 acquire 或崩在半路留下的孤儿设备 | `--key <device_key>` / `--device <id>` / `--all-mine`、`--no-lock` 不按 Home 也不熄屏(留在当前界面) |
 | `status` | 设备 × 锁全景(排查谁占了什么) | `--device <id>` 只看这一台(碰设备前的一秒确认)、`--busy` 只列被别人锁着的 |
 | `clean` | 回收陈旧锁 | `--all` 全清(慎用) |
+| `guard` | (内部)持锁期间盯着无关系统弹窗;acquire / wake 自动拉起,随锁退出,不必手调 | `--key <device_key>` |
 
 完整参数、JSON schema、exit code 表与锁目录布局见 [references/cli.md](references/cli.md)。
 
@@ -240,6 +242,40 @@ python3 "$SKILL_DIR/scripts/device_lock.py" release --key "$DEVICE_KEY"
 - 10 分钟仍不够(超长构建)时,完成后、开始 UI 交互前调一次 `wake --key "$DEVICE_KEY"`;交互中的点击会继续刷新系统计时。改时长用 `--screen-timeout <分钟>`,`0` = 完全不碰设备设置。
 - 只有长时间无人值守、期间又可能没有输入事件的测试才传 `--keep-awake`(彻底不熄屏,比放宽超时更进一步)。`wake --device` 找不到对应锁时会拒绝 `--keep-awake`,也不会放宽超时——没有 meta 就没人负责还原。
 - 完全不想碰屏幕时传 `--no-wake`(连放宽超时一起跳过);`release --no-lock` 则只还原设置、不熄屏。
+
+## 无关系统弹窗:自动关掉,但不碰测试(v7,仅 Android)
+
+有些系统弹窗和被测功能毫无关系,却会卡住测试或让设备停在奇怪的状态:插 USB 时 MIUI 弹的「USB 用于」;
+Play 保护装测试包时问「要发送应用以进行安全检查吗?」——装包一直卡着等人点,`patrol test` 停在
+`Executing tests of apk…`、logcat 里没有 app 日志。acquire / wake 交付前会按白名单扫一次,持锁期间还有一个
+**guard 子进程**盯着,弹出来就关掉。结果在返回 JSON 的 `system_dialogs`(`handled` 处理记录、`guard` 进程),
+`status` 里也能看到最近的处理记录。
+
+| 弹窗 | 认法(焦点窗口) | 怎么关 | 为什么这么选 |
+|---|---|---|---|
+| USB 用于(MIUI) | `com.android.settings/…UsbDetailsActivity` | 返回键 | 等于「取消」,USB 模式维持原样;不依赖系统语言 |
+| Play 保护:要发送应用以进行安全检查吗 | `com.android.vending/…PlayProtectDialogsActivity` | 点「不发送」 | 不可取消,返回键无效;「一律发送」改持久设置,「本次发送」把测试包传给 Google |
+
+两条都在 2026-09-28 实测过(M2104K10AC / MIUI 14、Pixel 2 XL / Android 11):关掉后 USB 仍是 `adb`,装包照常 `Success`。
+
+**「不影响测试」的四条边界**(加规则、改逻辑之前先读):
+
+1. **只认白名单。被测 app 自己触发的运行时权限框不碰**(permissioncontroller;MIUI 上是 `com.lbe.security.miui`)——
+   用例要断言它弹没弹、点的是允许还是拒绝,替它点掉会让「不该弹却弹了」的回归静默通过。那类框归测试代码自己处理
+   (Patrol 在 MIUI 上认不出它,要在项目的测试模块里兜底)。
+2. **有 instrumentation 真在跑(= 测试进行中)就不动手**,只记一条 `skipped: instrumentation_running`:`uiautomator dump`
+   要另连一次 UiAutomation,返回键 / 点击也可能落进被测 app。已知的两种都出现在测试起跑之前(插线时、装测试包时)。
+   只认**进程还活着**的 instrumentation:宿主那头硬掐掉的测试会在 AMS 里留下进程已死的僵尸记录,只数条目会把设备永远判成「在跑」。
+3. **动手前再读一次焦点**,那个框还在最前面才按键 / 点击。
+4. **只选一次性、不改设置、不外发数据的选项。**
+
+guard 不轮询 `dumpsys`(那要拿 WMS 的全局锁,每隔几秒来一次,测帧类用例里会多出卡顿),而是被动听
+`logcat -b events` 的 Activity 恢复事件,白名单里的窗口一恢复才去看。它随锁存亡:release、陈旧锁回收、`clean`
+之后 5 秒内自己退出并收掉 logcat 子进程;幂等重取复用同一个 guard。测的就是这些系统框、不想让它碰时传 `--keep-system-dialogs`。
+
+**加规则的量法**:框在前台时 `adb -s <id> shell "dumpsys window | grep mCurrentFocus"` 读包名与 Activity;先试返回键能不能关,
+能就用 `back`(不依赖系统语言);不能再在**没有测试在跑时** `uiautomator dump` 抄按钮上的字。补进脚本的
+`SYSTEM_DIALOG_RULES`,注明实测机型与日期。
 
 ## 分配策略与锁语义
 
@@ -297,6 +333,8 @@ Home 不杀进程。`acquire` 交付前与 `release` 收尾时脚本都会 force
 | 截图全黑 / 点击没反应 / driver 找不到 widget | 真机持锁期间自动锁屏已放宽到 10 分钟;更长的构建后跑 `wake --key $DEVICE_KEY` 再点亮;`screen.locked=true` 说明设了 PIN,需人工解一次 |
 | 测试后手机一直亮屏 / 不会自动锁屏 | 正常路径下 `release` 会按 Home 退出 app、把自动锁屏设为 1 分钟并熄屏。若会话崩在半路:被测 app 若还在前台,先 `adb -s <id> shell input keyevent KEYCODE_HOME`(app 的常亮 flag 会顶住自动锁屏);`settings get system screen_off_timeout` 查(`600000` 即为遗留的放宽值,改回 `60000`);`stay_on_while_plugged_in=7`(`dumpsys power` 里 `mStayOn=true`)是常亮,插着 USB 就永不熄屏,改回 `0`。下次 acquire 起手的陈旧锁回收也会自动收尾。**已熄屏又反复自己亮起来**是另一回事(供电抖动的插拔唤醒),见 `references/troubleshooting.md` |
 | 测试后手机意外熄屏了 / 回到了桌面 | `release` 的正常收尾就是 Home 退出 app → 熄屏落锁;想留在 app 界面继续看就传 `release --no-lock` |
+| `patrol test` 停在 `Executing tests of apk…`,前台是 Play 保护「要发送应用以进行安全检查吗」 / 插线后「USB 用于」盖在桌面上 | v7 起 guard 会自动关(见「无关系统弹窗」一节);`status --device <id>` 看 `dialog_guard.alive` 与 `system_dialogs`。没关掉时:锁不是 v7 领的(旧锁没有 guard,`wake --key` 会补起来)、传过 `--keep-system-dialogs`,或记录里是 `skipped: instrumentation_running`(测试已在跑,按设计不动手) |
+| 被测 app 的系统权限框(通知 / 日历 / 位置)没人点,测试卡住 | **分配器按设计不碰它**(用例要断言它)。在测试代码里处理;小米 MIUI 的框是 `com.lbe.security.miui` 弹的,Patrol 原生 API 认不出,要按包名 + 按钮字兜底 |
 | 鸿蒙设备不参与分配 | 只有 `hdc list targets -v` 里 **Connected** 的目标才算;还要显式 `--platform harmony` 或 `android,harmony`(`any` 不含鸿蒙) |
 | exit 6 `ENV_MISSING` 且提到 hdc | 没装 DevEco Studio,或 hdc 不在常见位置:设 `HDC_PATH` 指向 hdc 可执行文件 |
 | 忘了 release / 会话崩了 | 下次任意 acquire 起手全局回收死 pid / 超 TTL 的锁;不放心跑 `clean` |

@@ -115,6 +115,30 @@ adb -s <id> shell settings put global wake_when_plugged_or_unplugged 0
 
 `release` 会先按 Home 退出被测 app(Android `KEYCODE_HOME`、鸿蒙 `uinput -K -d 1 -u 1`),再把真机熄屏落锁(Android `KEYCODE_SLEEP`、鸿蒙 `power-shell suspend`),这是有意为之:被测 app 常设「保持常亮」flag,留在前台手机就一直亮着耗电;测完的手机不该停在解锁态。要留在 app 界面亮屏继续看,就传 `release --no-lock`(Home 与熄屏都跳过)。模拟器不受影响(不按 Home、不熄屏、不关机)。
 
+## 无关系统弹窗没被关掉 / 担心被关错了(v7)
+
+先看记录,别猜:
+
+```bash
+python3 scripts/device_lock.py status --device <id>
+# lock.dialog_guard  → {"pid", "alive", "started_at"}:guard 在不在
+# lock.system_dialogs → 最近 10 条:trigger(acquire/wake/guard)、dialog、action、closed、skipped
+adb -s <id> shell "dumpsys window | grep mCurrentFocus"   # 此刻前台是什么窗口
+```
+
+| 现象 | 原因 | 怎么办 |
+|---|---|---|
+| 没有 `dialog_guard` 字段 | 锁是 v7 之前领的,或不是 Android | `wake --key <key>` 会补起一个 |
+| `alive: false` | guard 被 kill 了(机器睡眠唤醒、手动杀进程) | 同上 |
+| 记录里是 `skipped: instrumentation_running` | 那一刻设备上有进程还活着的 instrumentation(测试进行中),按设计不动手 | 正常;测试中途冒出来的框本来就不该由外面替测试点 |
+| 记录里 `action: null`、`closed: false` | Play 保护这类按字点的框没找到「不发送」(系统语言不是中英文,或 Play 改了文案) | 框在前台、**没有测试在跑**时 `adb -s <id> shell uiautomator dump /data/local/tmp/x.xml && adb -s <id> exec-out cat /data/local/tmp/x.xml` 抄出按钮字,补进 `SYSTEM_DIALOG_RULES` 的 `texts` |
+| 框在前台却一条记录都没有 | 不在白名单里(焦点窗口的 `包名/Activity` 对不上) | 按 SKILL.md「加规则的量法」补一条;先试返回键能不能关 |
+| 被测 app 的权限框(通知 / 日历 / 位置)没人点 | **按设计不碰**——用例要断言它 | 在测试代码里处理(MIUI 的权限框是 `com.lbe.security.miui` 弹的,Patrol 原生 API 认不出,要按包名 + 按钮字兜底) |
+| 测的就是这些系统框,不想让它插手 | — | acquire / wake 传 `--keep-system-dialogs` |
+
+guard 只被动听 `logcat -b events` 的 Activity 恢复事件,不轮询 `dumpsys`,正常情况下对测试没有可观测的开销;
+`pgrep -fl "device_lock.py guard"` 能看到它和它那条 `adb logcat -b events` 子进程,锁一释放 5 秒内两者都会消失。
+
 ## 点击落到别的 app / 应用反复被切到前台 / 截图拍到的是另一个 app
 
 **不是设备坏了,也不是被测 app 崩了——是另一个 AI 会话正在用这台设备。**
@@ -259,6 +283,7 @@ python3 <skill根>/scripts/device_lock.py acquire --project "$PWD"
 - 内存探测失败(极少见)时闸门自动放行,不会因此拿不到设备。
 - 鸿蒙候选永远不需要启动,**不过内存闸门**;但已在跑的鸿蒙模拟器会计入闸门的运行中模拟器数(它也是 QEMU 虚拟机)。只有 `--platform` 里点了 harmony 时才去查(否则会为纯 Android 的 acquire 平白拉起 hdc 服务);`status` 只要装了 hdc 就会枚举。
 - 亮屏解锁、放宽超时、release 的 Home / 设置收尾 / 熄屏全程 fail-soft:任何一步失败都只写 stderr,acquire / wake / release 不会因此失败(release 恒 exit 0)。
+- 无关系统弹窗(v7)同样 fail-soft;只处理白名单里的窗口,有活着的 instrumentation 时不动手。guard 随锁存亡,幂等重取复用同一个,不会越领越多。
 - 屏幕设置只改真机、只记一次:同一 type 在锁 meta 里只记第一次(防重复 wake 撑大列表)。三种 type 都不存原值,release 一律写成省电常态:自动锁屏 1 分钟、常亮关掉、鸿蒙撤销超时覆盖。
 - `--memory` 只在**需要启动**模拟器时才有意义:领到真机、或复用已经跑着的模拟器时无效(跑起来的 VM 改不了 RAM),此时结果 JSON 的 `memory_mb` 为 null。
 - `--memory` 只对本工具新建的 AVD 写 `config.ini`;启动用户自己的 AVD(如 Pixel_10)只覆盖本次运行,不改他们的配置。手动持久修改:改 `~/.android/avd/<名>.avd/config.ini` 的 `hw.ramSize`(纯数字按 MB 解释)。
