@@ -1,16 +1,16 @@
 ---
 name: git-cz
-description: 统一所有项目的 Git 提交信息风格(emoji + Conventional Commits,格式沿用 git-cz)。要写 commit message、执行 git commit、修订提交信息(--amend / rebase reword)、配置 changelog.config.js、装提交校验钩子时都先读本 skill:它给出唯一契约「{emoji}{type}{scope}: {subject}」、10 个类型与对应 emoji、正文 / BREAKING CHANGE / Closes 段落规则。提交一律用普通 git 命令——按契约把消息写进临时文件,用 scripts/check_commit_msg.py 自检(纯 python3 标准库,Flutter / Java / HarmonyOS 等没有 node 的项目照样能用),再 git commit -F;不需要安装或调用 git-cz、commitizen、node。触发词:提交、commit、commit message、提交信息、提交规范、提交风格、统一提交、git cz、git-cz、commitizen、conventional commits、changelog.config.js、emoji 提交、commit-msg 钩子、提交校验、语义化提交。不适用于:生成 CHANGELOG.md 文件本身、PR 标题与描述、分支命名。
+description: 统一所有项目的 Git 提交信息风格(emoji + Conventional Commits,格式沿用 git-cz)。要写 commit message、执行 git commit、修订提交信息(--amend / rebase reword)、装提交校验钩子时都先读本 skill:它给出唯一契约「{emoji}{type}{scope}: {subject}」、10 个类型与对应 emoji、正文 / BREAKING CHANGE / Closes 段落规则。提交一律用普通 git 命令——按契约把消息写进临时文件,用 scripts/check_commit_msg.py 自检(纯 python3 标准库,规则写死在脚本里、不读任何配置文件,没有 node 的项目照样能用),再 git commit -F;不需要安装或调用 git-cz、commitizen、node,也不需要 changelog.config.js。触发词:提交、commit、commit message、提交信息、提交规范、提交风格、统一提交、git cz、git-cz、commitizen、conventional commits、emoji 提交、commit-msg 钩子、提交校验、语义化提交。不适用于:生成 CHANGELOG.md 文件本身、PR 标题与描述、分支命名。
 ---
 
 # 统一提交风格(git-cz)
 
 所有仓库的提交信息走同一个契约,**人和 AI 都用普通 git 命令提交**:照契约写好消息 →
 `check_commit_msg.py` 自检(也可以装成 commit-msg 钩子,每次 `git commit` 自动拦)→ `git commit -F`。
-不需要安装或调用 git-cz、commitizen、node。
+不需要安装或调用 git-cz、commitizen、node,也不需要任何配置文件。
 
-名字和配置沿用自 [git-cz](https://github.com/streamich/git-cz):标题照它 4.9.0 的拼装算法定下,
-`changelog.config.js` 仍是它的配置格式与查找规则——现在只当数据文件,由校验脚本读取。
+名字沿用自 [git-cz](https://github.com/streamich/git-cz):标题照它 4.9.0 的拼装算法定下。
+规则写死在 `scripts/check_commit_msg.py` 里,与下面的类型表一一对应。
 
 > 只有用户要求提交时才提交。本 skill 管的是「提交信息长什么样」,不是「要不要提交」。
 
@@ -86,13 +86,13 @@ emoji 即意图、没有 type 词。我们**只借它的 emoji 语义,不套它�
   「新增颤动集团状态管理」更错。`type` 和 `scope` 是固定英文,不受此约束。
 - 标题一行写完,`: ` 后跟主题,主题**不加结尾标点**(句号、感叹号、问号都不行)。
 - 主题祈使句:「新增登录页」「修复超时崩溃」,不是「新增了…」「修复过…」。
-- 主题长度 3 ~ 61 个字符(`maxMessageLength: 64` 减去 emoji 与空格占的 3)。
+- 主题长度 3 ~ 61 个字符(沿用 git-cz:上限 64 减去 emoji 与空格占的 3,按字符数计)。
 - 标题显示宽度建议 ≤ 72 列(**中文一个字算 2 列**,所以中文主题控制在 30 字以内)。
 - 标题与正文之间必须空一行;正文与页脚之间也是。
 - 正文每行 ≤ 72 列,git 不会替你折行,超了自己换行。
 - 破坏性变更必须是 `BREAKING CHANGE: 💥 …`,全大写、冒号后一个空格。
 - `scope` 可选,写受影响的模块(英文小写,如 `auth`、`patrol`);项目有约定的照项目来。
-  仓库配置里列了 `scopes` 时只能从中选(校验会拦),为空(全局模板的默认)时不限制。
+  校验不限取值,只拦空括号。
 - Merge / Revert / fixup! / squash! 提交由 git 生成,不套这套格式。
 
 ## 提交:普通 git 命令
@@ -122,15 +122,8 @@ rm -f "$msg"
 
 ## 让所有项目统一
 
-校验脚本从**仓库的 git 根目录**起逐级向上查找配置,就近命中一个即停(与 git-cz 的查找规则一致)。
-把配置放在家目录,本机所有仓库自动共用同一份:
-
-```bash
-cp <skill根>/assets/changelog.config.js ~/changelog.config.js
-```
-
-单个项目要限定 scope 的可选值,在该仓库根目录再放一份**完整**配置、列出 `scopes`——就近命中即停,
-不做逐级合并。
+规则写死在校验脚本里,不读任何配置文件——装了本 skill 的机器上,所有仓库自动按同一套判。
+仓库里即使有别的工具留下的 `changelog.config.js` / `.git-cz.json`,也不影响校验。
 
 给仓库装上校验钩子,之后每次 `git commit` 都自动过检:
 
@@ -145,27 +138,21 @@ python3 <skill根>/scripts/check_commit_msg.py install-hook --repo <仓库路径
 
 ```bash
 python3 <skill根>/scripts/check_commit_msg.py --file <消息文件>   # 或 --message "…" / 默认读 .git/COMMIT_EDITMSG
-python3 <skill根>/scripts/check_commit_msg.py show-config          # 看当前生效的配置与来源
 ```
 
 退出码 0 通过 / 1 不通过 / 2 用法错。常用参数:`--strict` 把警告也当失败、`--json` 机读、
-`--warn-only` 只报不拦。配置就是那份 `changelog.config.*`:有 node 时用 node 求值,没有 node 时用
-内置的字面量解析器读 `.js`,读不出来就**跳过校验**而不是拿默认值误判。
+`--warn-only` 只报不拦。要改规则就改脚本开头的契约常量(`TYPES`、`SUBJECT_MAX` 等),并同步本文件。
 
 ## 常见坑
 
-- **改了配置但没生效**:`.git-cz.json` 优先级高于 `changelog.config.js`,同目录下前者赢;
-  查找从 git 根目录起向上,放在子目录里的配置**永远不会被读到**。
 - **emoji 位置与用哪一套**:本契约 emoji 在最前、用 gitmoji 对齐的那套(`✨ feat: …`);
   git-cz 自带的默认模板把 emoji 放在冒号后、且用它自己的一套(`feat: 🎸 …`)。
   抄网上例子时注意区别。
-- **没装配置就不是这套契约**:找不到 `changelog.config.js` 时,`check_commit_msg.py` 会退回
-  git-cz 4.9.0 的内置默认值(`🎸 feat`、`🧨` 破坏性变更),照那套判——不是 gitmoji 对齐的这套。
-  新机器先复制配置再提交。
-- **前导 emoji 会打断 conventional-changelog / semantic-release 的默认解析**,
-  以后要自动出 CHANGELOG 得定制 `headerPattern`,或改用 `disableEmoji: true`。
-- **历史提交没有 emoji**:引入配置后新旧风格不一致是正常的,不要去改写已推送的历史。
+- **前导 emoji 会打断 conventional-changelog / semantic-release / commitlint 的默认解析**:
+  它们认的是 `^(\w*)(?:\((.*)\))?: (.*)$`,开头多个 emoji 整条匹配不上。以后要自动出 CHANGELOG,
+  给 parser 定制 `headerPattern: /^(?:\S+\s)?(\w*)(?:\((.*)\))?: (.*)$/`、
+  `headerCorrespondence: ['type', 'scope', 'subject']`。
+- **历史提交没有 emoji**:引入这套契约后新旧风格不一致是正常的,不要去改写已推送的历史。
 
-更多细节:配置全部键与逐项理由见 [references/config.md](references/config.md),
-校验脚本参数与各场景的 git 写法见 [references/cli.md](references/cli.md),
+更多细节:校验脚本参数与各场景的 git 写法见 [references/cli.md](references/cli.md),
 排错见 [references/troubleshooting.md](references/troubleshooting.md)。

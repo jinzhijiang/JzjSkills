@@ -1,36 +1,5 @@
 # 排错
 
-## 配置类
-
-**改了 `changelog.config.js` 但没生效**
-
-按顺序排查:
-
-```bash
-python3 <skill根>/scripts/check_commit_msg.py show-config --repo <仓库>   # 头一行 stderr 就是命中的文件
-```
-
-- 同目录下有 `.git-cz.json` → 它优先级更高,`changelog.config.js` 被无视。
-- 配置放在了子目录 → 查找只从 git 根目录**向上**走,子目录里的永远读不到。
-- 上层目录(比如 `~`)有另一份配置 → 就近命中即停,离 git 根更近的那份赢。
-- 项目级配置只写了 `scopes` 一个键 → 是**整份覆盖**不是合并,其余键会退回 git-cz 默认值
-  (于是 `format` 变回 `{type}{scope}: {emoji}{subject}`,emoji 跑到冒号后面去了)。
-
-**`show-config` 报「读不出」**
-
-本机没有 node,且配置文件里有变量、`require(...)`、函数或模板字符串——内置的字面量
-解析器只认纯字面量。两条路:装 node,或把配置改写成等价的 `.git-cz.json`。
-这种情况下校验会**跳过**而不是用默认值硬判,不会误伤合法提交。
-
-**报「类型 `x` 未列入 config.list」**
-
-该类型在 `types` 里有定义,却没写进 `list`。`list` 就是允许使用的类型清单,补进去即可。
-
-**报「未知 scope」**
-
-该仓库的配置里列了 `scopes`,只能从中选:改用列表里的值,或在该仓库的配置里补上。
-全局模板是 `scopes: []`,表示不限制、可以自由写模块名。
-
 ## 提交类
 
 **`git commit -F` 报 `nothing to commit` / `no changes added to commit`**
@@ -46,7 +15,6 @@ git 不会替你折行。手动断行,每行 ≤ 72 列(中文一个字 2 列,�
 **emoji 在终端里显示成方块或错位**
 
 终端字体缺 emoji 字形。不影响仓库里存的字节,`git log` 换个终端就正常。
-真要规避,改 `disableEmoji: true`(全仓库统一改,别一半带一半不带)。
 
 **已经推送的提交信息写错了**
 
@@ -68,16 +36,15 @@ git 不会替你折行。手动断行,每行 ≤ 72 列(中文一个字 2 列,�
 先手工复现看具体报什么:
 
 ```bash
-python3 <skill根>/scripts/check_commit_msg.py --file .git/COMMIT_EDITMSG --verbose
+python3 <skill根>/scripts/check_commit_msg.py --file .git/COMMIT_EDITMSG
 ```
 
 - 报「标题不符合格式」但看着没问题 → 多半是全角冒号「:」写成了半角以外的字符,
   或 `: ` 后面漏了空格、多了空格。
-- 报「主题超长」→ 上限是 `maxMessageLength - 3`,默认 61 个字符。
-- 报「主题要用中文写」→ `requireChineseSubject: true` 要求主题里至少有一个中文字符。
-  某个仓库确实要写英文提交,就在该仓库的配置里关掉它(整份配置抄过去再改这一个键)。
+- 报「主题超长」→ 上限 61 个字符(按字符数,不是列宽)。
+- 报「主题要用中文写」→ 契约要求主题里至少有一个中文字符。确实要写英文提交的仓库,别装这个钩子。
 - 只有「标题 N 列 > 72 列」这类警告是不拦截的(除非加了 `--strict`)。
-- 确实是规则太严 → 改配置,不要给钩子加例外;规则和配置必须是同一份。
+- 确实是规则太严 → 改 `check_commit_msg.py` 开头的契约常量并同步 SKILL.md,不要给钩子加例外。
 
 **临时绕过钩子**
 
@@ -87,8 +54,20 @@ python3 <skill根>/scripts/check_commit_msg.py --file .git/COMMIT_EDITMSG --verb
 
 **commitlint / conventional-changelog / semantic-release 不认这些提交**
 
-标题开头的 emoji 会让它们的默认 parser 整条匹配失败。解决方案见
-[config.md](config.md#与-conventional-changelog-生态的兼容性)。
+标题开头的 emoji 会让它们的默认 parser(`^(\w*)(?:\((.*)\))?: (.*)$`)整条匹配失败,
+自动生成的 CHANGELOG 会把这些提交归到「其他」或直接丢掉;`@commitlint/config-conventional`
+会报 `subject may not be empty` / `type may not be empty`。给 parser 定制:
+
+```js
+headerPattern: /^(?:\S+\s)?(\w*)(?:\((.*)\))?: (.*)$/,
+headerCorrespondence: ['type', 'scope', 'subject'],
+```
+
+commitlint 走 `parserPreset` 配同样的 `headerPattern`。本 skill 的校验脚本不依赖这些 parser,不受影响。
+
+**仓库里有别的工具留下的 `changelog.config.js` / `.git-cz.json`**
+
+不影响校验:规则写死在 `check_commit_msg.py` 里,不读任何配置文件。那些文件只对还在用 git-cz 命令的人有意义。
 
 **husky**
 

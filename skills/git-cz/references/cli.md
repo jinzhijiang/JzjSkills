@@ -1,22 +1,21 @@
 # 校验脚本与提交命令
 
-提交只用普通 git,不装也不调用 git-cz / commitizen / node。这里是 `check_commit_msg.py` 的
-全部参数,以及各场景的 git 写法。
+提交只用普通 git,不装也不调用 git-cz / commitizen / node,也没有配置文件。这里是
+`check_commit_msg.py` 的全部参数,以及各场景的 git 写法。
 
 ## check_commit_msg.py
 
-python3 标准库,不需要 node / npm。
+python3 标准库,不需要 node / npm。契约写死在脚本开头的常量里(`FORMAT`、`TYPES`、`SUBJECT_MAX`、
+页脚前缀),不读任何配置文件;仓库里有别的工具留下的 `changelog.config.js` 也不影响它。
 
 ```
 python3 <skill根>/scripts/check_commit_msg.py [--repo <仓库>] [check] [选项]
-python3 <skill根>/scripts/check_commit_msg.py show-config  [--repo <仓库>]
 python3 <skill根>/scripts/check_commit_msg.py install-hook [--repo <仓库>] [--force]
 ```
 
 | 子命令 | 作用 |
 |---|---|
 | `check`(默认,可省略) | 校验一条提交信息 |
-| `show-config` | 打印解析后的完整配置;stderr 头一行是命中的配置文件 |
 | `install-hook` | 往仓库装 commit-msg 钩子(跟随 `core.hooksPath`);已有同名钩子不覆盖,`--force` 覆盖前自动备份 |
 
 `check` 的选项:
@@ -28,12 +27,10 @@ python3 <skill根>/scripts/check_commit_msg.py install-hook [--repo <仓库>] [-
 | `--strict` | 警告也当失败(如标题超过 72 列) |
 | `--warn-only` | 只报不拦,恒退出 0 |
 | `--json` | 机读输出 |
-| `--quiet` / `--verbose` | 不打印配置提示 / 打印配置来源 |
-| `--repo <路径>` | 从哪个仓库起找配置,默认当前目录 |
+| `--repo <路径>` | 没给 `--file` / `--message` 时从哪个仓库读 `COMMIT_EDITMSG`,默认当前目录 |
 
 退出码:0 通过 / 1 不通过 / 2 用法错(不在仓库里又没给 `--file` / `--message`、文件不存在)。
-配置读不出来(没有 node,且 `.js` 不是纯字面量)时**跳过校验**、退出 0——不拿默认值硬判;
-加了 `--strict` 才按失败处理。
+早先的 `show-config` 子命令已随配置文件一起去掉;`--quiet` / `--verbose` 还收,但已无作用。
 
 ## 各场景的 git 写法
 
@@ -75,4 +72,5 @@ git 做不到的东西,反倒多了这些坑(git-cz 4.9.0):
 - scope 只能从配置列表里选,不能自由写模块名。
 - 中文正文靠 `word-wrap` 按空格折行,折不动,还是得自己断行。
 
-格式本身(拼装算法、页脚前缀、主题上限 `maxMessageLength - 3`)照旧沿用它,见 [config.md](config.md)。
+格式本身(拼装算法、页脚前缀、主题上限 61 字符)照旧沿用它;它的配置文件 `changelog.config.js`
+也不再需要——规则就一套,写死在校验脚本里,省掉查找顺序、整份覆盖、没有 node 时解析 `.js` 这一整层。
