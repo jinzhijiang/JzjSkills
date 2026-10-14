@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chrome File Upload"
+  short_description: "用 opencli 在主 Chrome 里分块写入并注入 <input type=file>，任意大小、带 SHA-256 校验"
+  default_prompt: "Use $chrome-file-upload to upload this local file into the page's file input in my main Chrome via opencli."
