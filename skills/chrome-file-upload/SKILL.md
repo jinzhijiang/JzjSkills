@@ -35,10 +35,16 @@ opencli browser up open https://<控制台地址>
 （联想发版就这样丢过一次）。只要接下来要等用户登录、放行、填账号，先在后台起保活：
 
 ```bash
-scripts/opencli_keepalive.sh up 30 &      # 每 15 秒发一次只读 eval，30 分钟后自动退出
+bash scripts/opencli_keepalive.sh up 30 &   # 每 15 秒发一次只读 eval，30 分钟后自动退出
+pgrep -fl 'opencli_keepalive.sh up'         # 必须看到进程，否则保活根本没起来
 ```
 
 人操作完就 `pkill -f 'opencli_keepalive.sh up'` 停掉它。
+
+**一律用 `bash` 调，起完用 `pgrep` 确认。** 2026-10-15 发现部署到 `~/.cc-switch/skills` 的副本丢了可执行位
+（仓库里是 755，部署副本是 644），直接执行脚本报 `permission denied`，配上 `>/dev/null 2>&1 &` 就是静默失败——
+一整天以为在保活，实际一次都没起来，百度的表单就这样丢了。在 agent 的一次性 shell 里起后台任务时，
+优先用工具自带的「后台运行」，或起完立刻 `pgrep` 核对。
 
 ## 1. 找到目标 input，打标记
 
@@ -96,6 +102,12 @@ opencli browser up network --since 2m      # 找上传请求（常见是 OSS / �
 - 截图类控件的预览常是 `data:` 地址，那只是本地预览；有没有真的传上去看网络请求。
 - **大文件注入后页面主线程可能卡 40 秒左右**（组件在算文件摘要），期间任何 eval 都会超时。
   等 60–75 秒再读，**不要重复注入**。
+- **Element Plus 上传组件注入后停在 `is-ready`**：文件进了上传列表，但状态一直是 `el-upload-list__item is-ready`、
+  进度 0%、一个上传请求都没有（2026-10-15 讯飞实测，`autoUpload=true` + 自定义 `httpRequest`）。
+  找到包住该 input 的 `ElUpload` 组件实例，调它暴露的 `submit()`，走的仍是页面自己的上传逻辑。
+  生产包 Vue 3 的元素上没有 `__vueParentComponent`，`app._instance` 也是空的，要从挂载容器（带 `__vue_app__` 的元素）
+  的 `_vnode` 往下遍历组件树，按 `type.name === 'ElUpload'` 且 `subTree.el` 包含该 input 来匹配；
+  完整代码见 `publish-app-xunfei` 的 `references/first-launch.md`。
 
 ## 5. 和页面交互的几条经验
 
