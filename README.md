@@ -29,6 +29,10 @@ JzjSkills/
 │   │   ├── agents/openai.yaml
 │   │   ├── references/                  # cli.md、troubleshooting.md
 │   │   └── scripts/wda.py               # python3 标准库；依赖 Xcode 与 libimobiledevice 的 iproxy
+│   ├── bagua-furnace/                   # 自建：Codeg「内五行 · 外八卦」多智能体炼丹炉调度指南与五助手提示词真源
+│   │   ├── SKILL.md
+│   │   ├── references/                  # mu.md、tu.md、jin.md、shui.md、huo.md（5 个五行助手完整系统提示词）
+│   │   └── scripts/sync_assistants.py   # python3 标准库，与 codeg.db 双向同步/对账
 │   ├── countly-data-analysis/           # 自建：自建 Countly 的 Read API 查询与埋点对账
 │   │   ├── SKILL.md
 │   │   ├── config.example.env           # 凭据模板，按项目放到 ~/.config/ai-ignore-config/<项目名>/
@@ -128,6 +132,7 @@ description: 简短描述这个 skill 做什么
 | `patrol-write-test` | 同上 | [skills/patrol-write-test/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-write-test) | Apache-2.0 | 2026-08-04 | 原样引入，仅含 `SKILL.md`；此前已在 `~/.cc-switch/skills` 中（2026-07-17 装入），内容与上游一致，本次纳入仓库管理 |
 | `patrol-test-architecture` | 同上 | [skills/patrol-test-architecture/](https://github.com/leancodepl/patrol/tree/master/skills/patrol-test-architecture) | Apache-2.0 | 2026-08-04 | 原样引入，仅含 `SKILL.md`；同上，此前已装入本机，本次纳入仓库管理 |
 | `aliyun-oss-ossutil` | [cinience/alicloud-skills](https://github.com/cinience/alicloud-skills) | [skills/storage/oss/aliyun-oss-ossutil/](https://github.com/cinience/alicloud-skills/tree/main/skills/storage/oss/aliyun-oss-ossutil) | MIT | 2026-08-04 | 引入上游 `b22dc0a`；上游按 `storage/oss/` 分层存放，这里拍平为 `skills/aliyun-oss-ossutil/`，因此改了两处写死的旧路径（`SKILL.md` 的校验命令、`scripts/check_ossutil.py` 改为按 `__file__` 自定位），其余原样；`LICENSE` 取自上游仓库根目录 |
+| `bagua-furnace` | 自建 / 内部整理 | — | — | 2026-11-16 | 自建；Codeg「内五行 · 外八卦」多智能体炼丹炉调度指南：以主会话为太极炉，通过 `delegate_to_agent` 调度内五行常驻助手（`木=1` 生发定案、`土=2` 承载致役、`金=3` 从革收敛、`水=4` 润下取证、`火=5` 炎上攻坚），内置五行生克制化、乘侮胜复异常纠偏、旺相休囚死阶段配额表，以及后天八卦 8 种标准工作流配方（震、巽、离、坤、兑、乾、坎、艮）与六十四重卦双助手结对模式 |
 | `countly-data-analysis` | 自建 / 内部整理 | — | — | 2026-08-05 | 自建；原在 `flutter_todo/.agents/skills/`，因笔笔记账也接入 Countly 而收拢到这里并去项目化：凭据按 **git 根目录名**解析（`~/.config/ai-ignore-config/<项目名>/countly.env`），避免从 A 项目静默查到 B 项目的数据；`scripts/countly_query.sh` 提供 list / event / range / views / crash / summary |
 | `publish-app-huawei` | — | — | — | 2026-09-03 | **已迁出**：与 flutter_todo 里那份合并后移到独立仓库 [publish-app-skills](https://github.com/jinzhijiang/publish-app-skills)，与其余 11 个应用市场发版 skill 一起管理 |
 | `chrome-file-upload` | 自建 / 内部整理 | 底层工具 opencli Browser Bridge | — | 2026-08-10 | 自建。**2026-10-14 由 `chrome-file-upload-bridge` 改名并换主路径**：改用 opencli 驱动用户主 Chrome，`scripts/opencli_upload.py` 把文件 base64 后按约 600KB 一块经多次 `opencli browser <s> eval` 写进页面，页面内拼回 `File`、用 SHA-256 与本地比对，再注入 `<input type=file>` 并异步派发 `change`（42MB APK 94 块约 21 秒）。换路的原因来自玩清单 3.6.0 多市场发版：chrome-devtools MCP 拉起的 Chrome 带 `navigator.webdriver`，阿里滑块、三星登录必拦；`opencli browser upload` 对 antd 隐藏 input 弹不出文件选择框；本地服务 + 页面 fetch 127.0.0.1 在主 Chrome 里直接 `Failed to fetch`。另有 `--expect-url` 防标签页被回收后写进空白页、`opencli_keepalive.sh` 续租（会话空闲约 45 秒即回收）。原方案（本地 `cors_server.py` + 页面 fetch 注入，最初从笔笔记账上架 OPPO 提炼）降级到 `references/loopback-fallback.md`，仅在只有 chrome-devtools MCP / Claude in Chrome 时使用 |
