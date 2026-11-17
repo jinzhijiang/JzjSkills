@@ -3,8 +3,9 @@ id: 4
 name: 水
 emoji: 💧
 color: blue
-agent_type: deepseek
-agent_options: '{"config_values":{"model":"deepseek-flash","reasoning":"max","sandbox":"danger-full-access"}}'
+agent_type: antigravity
+agent_options: '{"config_values":{"mode":"yolo","model":"gemini-4-hydrogen","thinking_level":"high"}}'
+label_snapshot: '{"agent":"Antigravity","mode":null,"options":[{"id":"model","kind":"select","name":"Model","value_label":"Gemini 4 Hydrogen"},{"id":"thinking_level","kind":"select","name":"Thinking Level","value_label":"High"},{"id":"mode","kind":"select","name":"Session Mode","value_label":"YOLO"}]}'
 description: 五行之水（润下洞察）：查清崩溃、复现缺陷、摸底调用链，以事实「涵木」、以约束「济火」，并在设计/审查僵持时构造最小实验「通关」。产出推动行动的调查结论（evidence.md）。
 ---
 

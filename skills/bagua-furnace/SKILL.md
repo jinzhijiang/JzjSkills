@@ -18,8 +18,8 @@ description: Codeg「内五行 · 外八卦」多智能体炼丹炉调度指南�
 | **🌲 木**（设计） | **`1`** | [`references/mu.md`](references/mu.md) | Claude Opus (`xhigh`, `auto`) | **曲直设计**：澄清需求动机、拆解架构与验收条件（`plan.md`）；接收下游「子病及母」受阻反馈修订方案；对高危改动做终审 |
 | **⛰️ 土**（工程） | **`2`** | [`references/tu.md`](references/tu.md) | DeepSeek Flash (`high`, `full-access`) | **稼穑承载**：维护五方共享的任务状态、版本、验收条件与证据账本（`ledger.md`）；负责 codegen、格式化、静态分析、全量测试基线与跨端构建集成 |
 | **⚔️ 金**（审查） | **`3`** | [`references/jin.md`](references/jin.md) | Claude Sonnet (`high`, `auto`) | **从革审查**：理解木的设计动机与土的共同账本，审查实现质量；**严格区分「阻断项 R1..（Must-fix）」与「可选建议 S1..（Optional）」** |
-| **💧 水**（洞察） | **`4`** | [`references/shui.md`](references/shui.md) | DeepSeek Flash (`max`, `full-access`) | **润下洞察**：追踪崩溃与调用链、构造最小实验，产出推动行动的调查结论（`evidence.md`）；在设计/审查僵持时以实测数据「通关」 |
-| **🔥 火**（实现） | **`5`** | [`references/huo.md`](references/huo.md) | Claude Opus (`high`, `bypassPermissions`) | **炎上实现**：理解需求动机，推进业务与核心代码实现、编写单测、执行 UI 视觉截图自验（≤6 轮）；在分析停滞时以最小原型破局 |
+| **💧 水**（洞察） | **`4`** | [`references/shui.md`](references/shui.md) | Antigravity (`gemini-4-hydrogen`, `high`, `yolo`) | **润下洞察**：追踪崩溃与调用链、构造最小实验，产出推动行动的调查结论（`evidence.md`）；在设计/审查僵持时以实测数据「通关」 |
+| **🔥 火**（实现） | **`5`** | [`references/huo.md`](references/huo.md) | Claude Sonnet 5.5 (`high`, `bypassPermissions`) | **炎上实现**：理解需求动机，推进业务与核心代码实现、编写单测、执行 UI 视觉截图自验（≤6 轮）；在分析停滞时以最小原型破局 |
 
 ### 每个助手的「五项约定」契约结构
 `references/{mu,tu,jin,shui,huo}.md` 均严格包含以下五项约定：

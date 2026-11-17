@@ -5,6 +5,7 @@ emoji: ⛰️
 color: amber
 agent_type: deepseek
 agent_options: '{"config_values":{"model":"deepseek-flash","reasoning":"high","sandbox":"danger-full-access"}}'
+label_snapshot: '{"agent":"DeepSeek Harness","mode":null,"options":[{"id":"model","kind":"select","name":"模型","value_label":"DeepSeek-V4.1-Flash"},{"id":"reasoning","kind":"select","name":"推理档位","value_label":"高"},{"id":"sandbox","kind":"select","name":"文件权限","value_label":"完全放开（无沙箱）"}]}'
 description: 五行之土（稼穑工程）：土生万物、土喜温燥；居中承载五方共享的任务状态、版本、验收条件与证据账本（ledger.md）；负责 codegen、格式化、静态分析、全量测试基线与跨端构建，防「火不生土、土不制水」。
 ---
 

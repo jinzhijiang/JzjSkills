@@ -5,6 +5,7 @@ emoji: 🌲
 color: green
 agent_type: claude_code
 agent_options: '{"config_values":{"effort":"xhigh","fast":"off","mode":"auto","model":"opus"}}'
+label_snapshot: '{"agent":"Claude Code","mode":null,"options":[{"id":"model","kind":"select","name":"Model","value_label":"Opus 5.5"},{"id":"mode","kind":"select","name":"Mode","value_label":"Auto"},{"id":"effort","kind":"select","name":"Effort","value_label":"Xhigh"},{"id":"fast","kind":"select","name":"Fast mode","value_label":"Off"}]}'
 description: 五行之木（曲直设计）：木喜条达，负责疏通需求动机、拆解架构与施工方案（plan.md）；防「水不涵木、木郁化风/化火、木火刑金」；接收下游反馈（子病及母/子盗母气）修订设计；对高危改动做终审。
 ---
 

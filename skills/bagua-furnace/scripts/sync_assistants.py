@@ -56,18 +56,27 @@ def parse_assistant_md(path: Path) -> dict[str, str | int]:
 
 
 def format_assistant_md(meta: dict) -> str:
-    return (
-        f"---\n"
-        f"id: {meta['id']}\n"
-        f"name: {meta['name']}\n"
-        f"emoji: {meta['emoji']}\n"
-        f"color: {meta['color']}\n"
-        f"agent_type: {meta['agent_type']}\n"
-        f"agent_options: '{meta['agent_options']}'\n"
-        f"description: {meta['description']}\n"
-        f"---\n\n"
-        f"{str(meta['instructions']).rstrip()}\n"
+    lines = [
+        "---",
+        f"id: {meta['id']}",
+        f"name: {meta['name']}",
+        f"emoji: {meta['emoji']}",
+        f"color: {meta['color']}",
+        f"agent_type: {meta['agent_type']}",
+        f"agent_options: '{meta['agent_options']}'",
+    ]
+    if meta.get("label_snapshot"):
+        lines.append(f"label_snapshot: '{meta['label_snapshot']}'")
+    lines.extend(
+        [
+            f"description: {meta['description']}",
+            "---",
+            "",
+            str(meta["instructions"]).rstrip(),
+            "",
+        ]
     )
+    return "\n".join(lines)
 
 
 def cmd_check(db_path: Path) -> int:
@@ -82,7 +91,8 @@ def cmd_check(db_path: Path) -> int:
             continue
         md = parse_assistant_md(fpath)
         row = conn.execute(
-            "SELECT id, name, description, avatar, instructions FROM assistant WHERE id = ?",
+            "SELECT id, name, description, avatar, agent_type, agent_options, label_snapshot, instructions "
+            "FROM assistant WHERE id = ?",
             (aid,),
         ).fetchone()
         if not row:
@@ -95,12 +105,15 @@ def cmd_check(db_path: Path) -> int:
             or row["description"] != md["description"]
             or avatar.get("emoji") != md["emoji"]
             or avatar.get("color") != md["color"]
+            or row["agent_type"] != md["agent_type"]
+            or row["agent_options"] != md["agent_options"]
+            or (md.get("label_snapshot") and row["label_snapshot"] != md["label_snapshot"])
             or row["instructions"].rstrip() != str(md["instructions"]).rstrip()
         ):
             print(f"[DIFF] id={aid} ({fname}) differs from codeg.db", file=sys.stderr)
             diffs += 1
         else:
-            print(f"[OK] id={aid} {md['name']} ({fname}) in sync")
+            print(f"[OK] id={aid} {md['name']} ({fname}) in sync [{row['agent_type']}]")
     conn.close()
     return 1 if diffs else 0
 
@@ -116,19 +129,40 @@ def cmd_apply(db_path: Path) -> int:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            conn.execute(
-                "UPDATE assistant SET name = ?, description = ?, avatar = ?, "
-                "instructions = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                (
-                    md["name"],
-                    md["description"],
-                    avatar_json,
-                    md["instructions"],
-                    now_iso,
-                    aid,
-                ),
-            )
-            print(f"[APPLIED] {fname} -> codeg.db (id={aid}, name={md['name']})")
+            if md.get("label_snapshot"):
+                conn.execute(
+                    "UPDATE assistant SET name = ?, description = ?, avatar = ?, "
+                    "agent_type = ?, agent_options = ?, label_snapshot = ?, "
+                    "instructions = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                    (
+                        md["name"],
+                        md["description"],
+                        avatar_json,
+                        md["agent_type"],
+                        md["agent_options"],
+                        md["label_snapshot"],
+                        md["instructions"],
+                        now_iso,
+                        aid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE assistant SET name = ?, description = ?, avatar = ?, "
+                    "agent_type = ?, agent_options = ?, "
+                    "instructions = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                    (
+                        md["name"],
+                        md["description"],
+                        avatar_json,
+                        md["agent_type"],
+                        md["agent_options"],
+                        md["instructions"],
+                        now_iso,
+                        aid,
+                    ),
+                )
+            print(f"[APPLIED] {fname} -> codeg.db (id={aid}, name={md['name']}, agent={md['agent_type']})")
     conn.close()
     return 0
 
@@ -139,7 +173,7 @@ def cmd_export(db_path: Path) -> int:
     conn.row_factory = sqlite3.Row
     for aid, fname in ASSISTANT_FILES.items():
         row = conn.execute(
-            "SELECT id, name, description, avatar, agent_type, agent_options, instructions "
+            "SELECT id, name, description, avatar, agent_type, agent_options, label_snapshot, instructions "
             "FROM assistant WHERE id = ?",
             (aid,),
         ).fetchone()
@@ -152,6 +186,7 @@ def cmd_export(db_path: Path) -> int:
                 "color": avatar["color"],
                 "agent_type": row["agent_type"],
                 "agent_options": row["agent_options"],
+                "label_snapshot": row["label_snapshot"],
                 "description": row["description"],
                 "instructions": row["instructions"],
             }

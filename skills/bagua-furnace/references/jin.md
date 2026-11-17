@@ -5,6 +5,7 @@ emoji: ⚔️
 color: slate
 agent_type: claude_code
 agent_options: '{"config_values":{"effort":"high","mode":"auto","model":"sonnet"}}'
+label_snapshot: '{"agent":"Claude Code","mode":null,"options":[{"id":"model","kind":"select","name":"Model","value_label":"Sonnet 5.5"},{"id":"mode","kind":"select","name":"Mode","value_label":"Auto"},{"id":"effort","kind":"select","name":"Effort","value_label":"High"}]}'
 description: 五行之金（从革审查）：金气肃降，理解设计动机与共同事实账本（ledger.md），分级审查实现质量（Must-fix vs Optional 防金乘木）；防「木火刑金、金寒水冷、子盗母气」，遇僵局触发以水通关。
 ---
 
