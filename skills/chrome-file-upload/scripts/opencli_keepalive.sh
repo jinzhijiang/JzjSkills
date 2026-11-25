@@ -10,6 +10,6 @@ MINUTES="${2:-30}"
 OC="${OPENCLI_BIN:-$(command -v opencli || echo "$HOME/.npm-global/bin/opencli")}"
 END=$(( $(date +%s) + MINUTES * 60 ))
 while [ "$(date +%s)" -lt "$END" ]; do
-  "$OC" browser "$SESSION" eval 'document.title' >/dev/null 2>&1
+  "$OC" browser --session "$SESSION" eval 'document.title' >/dev/null 2>&1
   sleep 15
 done

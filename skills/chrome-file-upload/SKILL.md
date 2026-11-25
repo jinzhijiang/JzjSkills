@@ -20,13 +20,13 @@ description: 在用户的主 Chrome 里把本地文件塞进网页的 `<input ty
 ## 0. 前提
 
 ```bash
-opencli doctor          # 需要 Extension: connected；提示 Stale daemon 就 opencli daemon restart
+opencli doctor          # 需要 opencli 2.x 且扩展已连接（extensionConnected: true）；提示 daemon 过期就 opencli daemon restart
 ```
 
 选一个会话名（下面用 `up`），之后所有命令都带上它：
 
 ```bash
-opencli browser up open https://<控制台地址>
+opencli browser --session up open https://<控制台地址>
 ```
 
 登录、验证码、二次验证由用户在主 Chrome 里亲自完成，不代填、不读取凭据。
@@ -51,8 +51,8 @@ pgrep -fl 'opencli_keepalive.sh up'         # 必须看到进程，否则保活�
 别猜下标。先列出页面上所有 file input 及其上下文，确认后打一个稳定的属性标记：
 
 ```bash
-opencli browser up eval '(() => JSON.stringify(Array.from(document.querySelectorAll("input[type=file]")).map((el, i) => ({ i, accept: el.accept, ctx: ((el.closest(".ant-form-item, .el-form-item, [class*=upload], div") || {}).innerText || "").replace(/\s+/g, " ").slice(0, 40) }))))()'
-opencli browser up eval '(() => { document.querySelectorAll("input[type=file]")[0].setAttribute("data-cfu", "apk"); return "tagged"; })()'
+opencli browser --session up eval '(() => JSON.stringify(Array.from(document.querySelectorAll("input[type=file]")).map((el, i) => ({ i, accept: el.accept, ctx: ((el.closest(".ant-form-item, .el-form-item, [class*=upload], div") || {}).innerText || "").replace(/\s+/g, " ").slice(0, 40) }))))()'
+opencli browser --session up eval '(() => { document.querySelectorAll("input[type=file]")[0].setAttribute("data-cfu", "apk"); return "tagged"; })()'
 ```
 
 - 上传方式有「单包 / 双包」之类的切换时，先切好再找 input——切换会重建 input。
@@ -61,7 +61,7 @@ opencli browser up eval '(() => { document.querySelectorAll("input[type=file]")[
 ## 2. 快路径：opencli 自带 upload
 
 ```bash
-opencli browser up upload '[data-cfu="apk"]' /abs/path/app.apk
+opencli browser --session up upload '[data-cfu="apk"]' /abs/path/app.apk
 ```
 
 它靠点击 input、拦截文件选择框来填文件。报 `Page.fileChooserOpened not received within 5s`
@@ -79,7 +79,7 @@ python3 scripts/opencli_upload.py --session up --file /abs/path/app.apk \
 | `--selector` | 目标 `input[type=file]` 的 CSS；省略则只写入并校验，文件留在 `window.__cfu.files[key]` |
 | `--expect-url` | 当前页网址必须包含这段文字，否则中止。防止标签页被回收后把文件写进 `about:blank` |
 | `--iframe` | input 在**同源** iframe 里时，给 iframe 的 CSS；`File` / `DataTransfer` 用 iframe 自己的 window 构造 |
-| `--frame` | input 在**跨源** iframe 里时，用 `opencli browser up frames` 拿到的下标 |
+| `--frame` | input 在**跨源** iframe 里时，用 `opencli browser --session up frames` 拿到的下标 |
 | `--name` / `--type` | 页面看到的文件名、MIME；默认取本地文件名，`.apk` 自动用 `application/vnd.android.package-archive` |
 
 输出一行 JSON：`page`、`size`、`sha256`、`page_sha256_verified`、`chunks`、`push_seconds`、`injected`。
@@ -95,7 +95,7 @@ python3 scripts/opencli_upload.py --session up --file /abs/path/app.apk \
 以**页面回显**和**网络请求**为准，不看 `input.files`（多数组件读完就清空）。
 
 ```bash
-opencli browser up network --since 2m      # 找上传请求（常见是 OSS / 对象存储的 POST）是否 200
+opencli browser --session up network --since 2m      # 找上传请求（常见是 OSS / 对象存储的 POST）是否 200
 ```
 
 - 平台解析出的包名、版本、大小与本地一致才算传对。
@@ -111,18 +111,26 @@ opencli browser up network --since 2m      # 找上传请求（常见是 OSS / �
 
 ## 5. 和页面交互的几条经验
 
-- 点击优先用 `opencli browser up click '<css>'`（CDP 真实点击，React / Vue 事件都认）。
+- **命令格式（opencli 2.x）**：`opencli browser --session <会话> <子命令> …`。旧写法 `opencli browser <会话> <子命令>`
+  报 `unknown command`。`eval` 的输出是 JSON 信封 `{"ok":true,"data":…}`，脚本里要从 `data` 取值；
+  页面脚本抛错时是 `{"ok":false,"error":…}` 且退出码非 0。
+- **后台标签页的定时器会被限速**：一次 `eval` 里靠 `setTimeout` 反复等待的 async 脚本会报 `cdp_timeout`，
+  页面只改了一半。批量点选改成同步 `click()`，改完读页面状态核对；脚本要写成可重复执行。
+- `click` 报 `Native input requires a visible browser page`（窗口在后台）时，改用 eval 里的 JS 点击。
+- `attach_failed` 隔几秒重试仍不消失时（别的扩展插了 iframe），换一个新会话名重新打开页面再填。
+- 有些后台点了「上传」按钮才弹出对话框、生成 file input（如华为 AGC），先点按钮再找 input。
+- 点击优先用 `opencli browser --session up click '<css>'`（CDP 真实点击，React / Vue 事件都认）。
   要用 JS 点时写成 `setTimeout(() => el.click(), 50)` 立即返回，再单独读结果——
   同步 `el.click()` 遇到页面长任务会把调用挂到超时。
 - 读表单时按标签名跳过「账号 / 密码 / 电话」类字段，别把测试账号读进输出。
-- 页面里的 React / Vue 受控输入框，用 `opencli browser up fill '<css>' '<文本>'`，它会回读校验。
+- 页面里的 React / Vue 受控输入框，用 `opencli browser --session up fill '<css>' '<文本>'`，它会回读校验。
 - 提交、发布、删除这类不可逆动作不在本 skill 范围，照常逐项取得用户确认。
 
 ## 6. 收尾
 
 ```bash
 pkill -f 'opencli_keepalive.sh up'  # 停保活
-opencli browser up close            # 释放会话标签页
+opencli browser --session up close            # 释放会话标签页
 ```
 
 临时复制出来的证件、安装包别留在 `/tmp` 里太久。

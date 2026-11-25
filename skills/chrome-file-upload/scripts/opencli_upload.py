@@ -2,10 +2,10 @@
 """把本地文件经 opencli Browser Bridge 分块写进用户主 Chrome 的页面，拼回 File 后注入 <input type=file>。
 
 为什么不用别的路：
-  - `opencli browser <s> upload` 靠点击 input 等文件选择框，antd / 隐藏 input 常常不弹
+  - `opencli browser upload` 靠点击 input 等文件选择框，antd / 隐藏 input 常常不弹
     （报 `Page.fileChooserOpened not received within 5s`）。
   - 本地 HTTP 服务 + 页面 fetch(127.0.0.1) 在主 Chrome 里会被本地网络访问策略直接拒（`Failed to fetch`）。
-  这里把文件 base64 后按块塞进 `window.__cfu.buf[key]`，每块一次 `opencli browser <s> eval`，
+  这里把文件 base64 后按块塞进 `window.__cfu.buf[key]`，每块一次 `opencli browser eval`，
   字节只走 opencli 自己的通道，不依赖文件选择框，也不碰本地网络权限。
 
 用法：
@@ -20,12 +20,12 @@
     python3 opencli_upload.py --session up --file /abs/a.png \\
         --iframe 'iframe#main' --selector '#uploadapk_btn input[type=file]'
 
-    # input 在跨源 iframe 里：先 `opencli browser <s> frames` 拿下标
+    # input 在跨源 iframe 里：先 `opencli browser --session <s> frames` 拿下标
     python3 opencli_upload.py --session up --file /abs/a.png --frame 1 --selector 'input[type=file]'
 
 输出一行 JSON：size / sha256（本地与页面两侧）/ chunks / 是否注入。任一步失败以非 0 退出。
 
-依赖：python3 标准库 + 已连通的 opencli（`opencli doctor` 里 Extension: connected）。
+依赖：python3 标准库 + 已连通的 opencli 2.x（`opencli doctor` 里 `extensionConnected: true`）。
 """
 
 from __future__ import annotations
@@ -67,25 +67,40 @@ def js_str(value: str) -> str:
 
 class Page:
     def __init__(self, opencli: str, session: str, frame: str | None):
-        self.base = [opencli, "browser", session, "eval"]
+        self.base = [opencli, "browser", "--session", session, "eval"]
         if frame is not None:
             self.base += ["--frame", str(frame)]
 
-    def eval(self, js: str, timeout: int = 120) -> str:
+    def eval(self, js: str, timeout: int = 120):
+        """执行页面脚本，返回 opencli 2.x JSON 信封 `{"ok":…,"data":…}` 里的 data。"""
         r = subprocess.run(self.base + [js], capture_output=True, text=True, timeout=timeout)
-        lines = [ln for ln in r.stdout.strip().splitlines() if ln.strip()]
-        last = lines[-1] if lines else ""
-        if r.returncode != 0 or last.startswith("✖") or not lines:
-            err = (r.stderr.strip() or r.stdout.strip())[-600:]
-            raise RuntimeError(f"opencli eval failed: {err}")
-        return last
+        envelope = parse_envelope(r.stdout)
+        if r.returncode != 0 or envelope is None or not envelope.get("ok"):
+            detail = (envelope or {}).get("error") or r.stderr.strip() or r.stdout.strip() or "no output"
+            raise RuntimeError(f"opencli eval failed: {str(detail)[-600:]}")
+        return envelope.get("data")
 
     def eval_json(self, js: str, timeout: int = 120) -> dict:
         out = self.eval(js, timeout)
+        if isinstance(out, dict):
+            return out
         try:
             return json.loads(out)
+        except (TypeError, json.JSONDecodeError):
+            raise RuntimeError(f"unexpected eval output: {str(out)[:300]}")
+
+
+def parse_envelope(stdout: str) -> dict | None:
+    """整段是 JSON 就直接用；前面混了提示行时，取最后一行能解析出信封的。"""
+    text = stdout.strip()
+    for cand in [text] + text.splitlines()[::-1]:
+        try:
+            value = json.loads(cand)
         except json.JSONDecodeError:
-            raise RuntimeError(f"unexpected eval output: {out[:300]}")
+            continue
+        if isinstance(value, dict) and "ok" in value:
+            return value
+    return None
 
 
 def main() -> int:
@@ -94,7 +109,7 @@ def main() -> int:
     ap.add_argument("--file", required=True, help="local file path")
     ap.add_argument("--selector", help="CSS of the target input[type=file]; omit to only stage the file")
     ap.add_argument("--iframe", help="CSS of a same-origin iframe that contains the input")
-    ap.add_argument("--frame", help="cross-origin iframe index from `opencli browser <s> frames`")
+    ap.add_argument("--frame", help="cross-origin iframe index from `opencli browser --session <s> frames`")
     ap.add_argument("--name", help="file name the page sees (default: basename)")
     ap.add_argument("--type", help="MIME type (default: guessed from extension)")
     ap.add_argument("--key", help="staging key in window.__cfu (default: derived from file name)")
